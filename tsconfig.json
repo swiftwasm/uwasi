@@ -1,0 +1,15 @@
+{
+    "compilerOptions": {
+        "declaration": true,
+        "module": "CommonJS",
+        "esModuleInterop": true,
+        "rootDir": "src",
+        "outDir": "lib",
+        "strict": true,
+        "target": "es2017",
+        "lib": ["es2020", "DOM"],
+        "skipLibCheck": true
+    },
+    "include": ["src/**/*"],
+    "exclude": ["node_modules"]
+}
