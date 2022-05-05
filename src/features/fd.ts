@@ -1,5 +1,5 @@
 import { WASIAbi } from "../abi";
-import { WASIOptions } from "../options";
+import { WASIFeatureProvider, WASIOptions } from "../options";
 
 const iovec_t = {
     size: 8,
@@ -40,7 +40,7 @@ export function useStdio(
             stdout: console.log,
             stderr: console.error,
         }
-): (options: WASIOptions, abi: WASIAbi, memoryView: () => DataView) => WebAssembly.ModuleImports {
+): WASIFeatureProvider {
     return (options, abi, memoryView) => {
         const decoder = new TextDecoder('utf-8');
         return {
@@ -86,7 +86,7 @@ export function useStdio(
     };
 }
 
-export function useFS(useOptions: { fs: any }): (options: WASIOptions, abi: WASIAbi, memoryView: () => DataView) => WebAssembly.ModuleImports {
+export function useFS(useOptions: { fs: any }): WASIFeatureProvider {
     return (options: WASIOptions, abi: WASIAbi, memoryView: () => DataView) => {
         // TODO: implement fd_* syscalls using `useOptions.fs`
         return {}

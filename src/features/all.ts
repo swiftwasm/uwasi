@@ -1,5 +1,5 @@
 import { WASIAbi } from "../abi";
-import { WASIOptions } from "../options";
+import { WASIFeatureProvider, WASIOptions } from "../options";
 import { useArgs } from "./args";
 import { useClock } from "./clock";
 import { useEnviron } from "./environ";
@@ -9,7 +9,7 @@ import { defaultRandomFillSync, useRandom } from "./random";
 
 export function useAll(useOptions: { fs?: any, randomFillSync: (buffer: Uint8Array) => void } = {
     fs: undefined, randomFillSync: defaultRandomFillSync,
-}): (options: WASIOptions, abi: WASIAbi, memoryView: () => DataView) => WebAssembly.ModuleImports {
+}): WASIFeatureProvider {
     return (options: WASIOptions, abi: WASIAbi, memoryView: () => DataView) => {
         const features = [
             useEnviron, useArgs, useClock, useProc,

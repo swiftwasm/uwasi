@@ -1,5 +1,5 @@
 import { WASIAbi } from "../abi";
-import { WASIOptions } from "../options";
+import { WASIFeatureProvider, WASIOptions } from "../options";
 
 export const defaultRandomFillSync = (buffer: Uint8Array) => {
     const crypto = require('crypto')
@@ -19,7 +19,7 @@ export function useRandom(
     } = {
         randomFillSync: defaultRandomFillSync,
     }
-): (options: WASIOptions, abi: WASIAbi, memoryView: () => DataView) => WebAssembly.ModuleImports {
+): WASIFeatureProvider {
     return (options, abi, memoryView) => {
         return {
             random_get: (bufferOffset: number, length: number) => {
