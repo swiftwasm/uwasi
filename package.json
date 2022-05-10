@@ -2,9 +2,10 @@
   "name": "uwasi",
   "version": "1.0.0",
   "description": "",
-  "main": "lib/index.js",
+  "main": "lib/cjs/index.js",
+  "module": "lib/esm/index.js",
   "scripts": {
-    "build": "tsc"
+    "build": "tsc -p tsconfig.esm.json && tsc -p tsconfig.cjs.json"
   },
   "keywords": [],
   "author": "",
