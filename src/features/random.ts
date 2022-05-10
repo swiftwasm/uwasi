@@ -1,14 +1,6 @@
 import { WASIAbi } from "../abi";
-import { WASIFeatureProvider, WASIOptions } from "../options";
-
-export const defaultRandomFillSync = (buffer: Uint8Array) => {
-    const crypto = require('crypto')
-    if (crypto && crypto.getRandomValues) {
-        crypto.getRandomValues(buffer);
-    } else if (globalThis.crypto && (globalThis.crypto as any).randomFillSync) {
-        (globalThis.crypto as any).randomFillSync(buffer);
-    }
-}
+import { WASIFeatureProvider } from "../options";
+import { defaultRandomFillSync } from "../platforms/crypto"
 
 /**
  * Create a feature provider that provides `random_get` with `crypto` APIs as backend by default.

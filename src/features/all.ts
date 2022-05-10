@@ -5,7 +5,8 @@ import { useClock } from "./clock";
 import { useEnviron } from "./environ";
 import { useFS, useStdio } from "./fd";
 import { useProc } from "./proc";
-import { defaultRandomFillSync, useRandom } from "./random";
+import { useRandom } from "./random";
+import { defaultRandomFillSync } from "../platforms/crypto"
 
 export function useAll(useOptions: { fs?: any, randomFillSync: (buffer: Uint8Array) => void } = {
     fs: undefined, randomFillSync: defaultRandomFillSync,

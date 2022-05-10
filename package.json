@@ -4,6 +4,9 @@
   "description": "",
   "main": "lib/cjs/index.js",
   "module": "lib/esm/index.js",
+  "browser": {
+    "./lib/esm/platforms/crypto.js": "./lib/esm/platforms/crypto.browser.js"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.esm.json && tsc -p tsconfig.cjs.json"
   },
