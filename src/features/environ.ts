@@ -15,7 +15,7 @@ export function useEnviron(options: WASIOptions, abi: WASIAbi, memoryView: () =>
                 const value = options.env[key];
                 view.setUint32(offsetOffset, bufferOffset, true);
                 offsetOffset += 4;
-                bufferOffset += abi.writeString(view, `${key}=${value}\0`, environBuf);
+                bufferOffset += abi.writeString(view, `${key}=${value}\0`, bufferOffset);
             }
             return WASIAbi.WASI_ESUCCESS;
         },

@@ -2,6 +2,7 @@ import { WASI, useEnviron, useArgs, useClock, useProc, useRandom, useStdio } fro
 import { WASIAbi } from "../../src/abi";
 import { existsSync } from "fs";
 import { readFile } from "fs/promises";
+import { basename } from "path"
 
 export async function runTest(filePath: string) {
     let stdout = "";
@@ -39,8 +40,16 @@ export async function runTest(filePath: string) {
             return { ...acc, [components[0]]: components.slice(1).join("=") };
         }, {});
     })()
+    const args = await (async () => {
+        const path = filePath.replace(/\.wasm$/, ".arg");
+        if (!existsSync(path)) {
+            return [];
+        }
+        const data = await readFile(path, "utf8");
+        return data.split("\n").map(line => line.trim()).filter(line => line.length > 0);
+    })()
     const wasi = new WASI({
-        args: [],
+        args: [basename(filePath)].concat(args),
         env,
         features: features,
     });

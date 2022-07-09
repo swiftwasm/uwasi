@@ -12,10 +12,6 @@ describe("wasi-test-suite-libstd", () => {
         "fs_metadata-file.wasm",
         "fs_rename-directory.wasm",
         "fs_rename-file.wasm",
-        "env_args-many.wasm",
-        "env_args-none.wasm",
-        "env_args-some.wasm",
-        "env_vars-many.wasm",
     ]
 
     for (const entry of entries) {
