@@ -1,3 +1,4 @@
+[![npm version](https://badge.fury.io/js/uwasi.svg)](https://badge.fury.io/js/uwasi)
 [![.github/workflows/test.yml](https://github.com/swiftwasm/uwasi/actions/workflows/test.yml/badge.svg)](https://github.com/swiftwasm/uwasi/actions/workflows/test.yml)
 
 # μWASI
