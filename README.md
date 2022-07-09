@@ -7,6 +7,12 @@ The system calls provided by this library are configurable.
 
 With minimal configuration, it provides WASI system calls which just return `WASI_ENOSYS`.
 
+## Installation
+
+```bash
+npm install uwasi
+```
+
 ## Example
 
 ### With all system calls enabled

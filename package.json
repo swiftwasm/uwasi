@@ -1,7 +1,7 @@
 {
   "name": "uwasi",
   "version": "1.0.0",
-  "description": "",
+  "description": "Micro modularized WASI runtime for JavaScript",
   "main": "lib/cjs/index.js",
   "module": "lib/esm/index.js",
   "browser": {
@@ -9,10 +9,22 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.esm.json && tsc -p tsconfig.cjs.json",
-    "test": "jest"
+    "test": "jest",
+    "prepare": "npm run build"
   },
-  "keywords": [],
-  "author": "",
+  "keywords": ["webassembly", "wasm", "wasi"],
+  "bugs": {
+    "url": "https://github.com/swiftwasm/uwasi/issues"
+  },
+  "homepage": "https://github.com/swiftwasm/uwasi",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/swiftwasm/uwasi.git"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "author": "SwiftWasm Team",
   "license": "MIT",
   "devDependencies": {
     "@types/jest": "^28.1.4",
