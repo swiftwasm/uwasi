@@ -7,12 +7,21 @@ import { WASIOptions } from "../options";
 export function useClock(options: WASIOptions, abi: WASIAbi, memoryView: () => DataView): WebAssembly.ModuleImports {
     return {
         clock_res_get: (clockId: number, resolution: number) => {
-            // There is no standard way to guarantee monotonicity in JavaScript,
-            if (clockId !== WASIAbi.WASI_CLOCK_REALTIME) {
-                return WASIAbi.WASI_ENOSYS;
+            let resolutionValue: number;
+            switch (clockId) {
+                case WASIAbi.WASI_CLOCK_MONOTONIC: {
+                    resolutionValue = 1;
+                    break;
+                }
+                case WASIAbi.WASI_CLOCK_REALTIME: {
+                    resolutionValue = 1000;
+                    break;
+                }
+                default: return WASIAbi.WASI_ENOSYS;
             }
             const view = memoryView();
-            view.setBigUint64(resolution, BigInt(1000), true);
+            // 64-bit integer, but only the lower 32 bits are used.
+            view.setUint32(resolution, resolutionValue, true);
             return WASIAbi.WASI_ESUCCESS;
         },
         clock_time_get: (clockId: number, precision: number, time: number) => {

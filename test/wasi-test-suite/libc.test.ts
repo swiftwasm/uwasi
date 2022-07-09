@@ -6,7 +6,6 @@ describe("wasi-test-suite-libc", () => {
     const suiteDir = pathJoin(__dirname, "../../third_party/wasi-test-suite/libc");
     const entries = readdirSync(suiteDir);
     const UNSUPPORTED = [
-        "clock_getres-monotonic.wasm",
         "clock_gettime-monotonic.wasm",
         "ftruncate.wasm",
     ]

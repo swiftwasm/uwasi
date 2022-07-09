@@ -6,7 +6,6 @@ describe("wasi-test-suite-core", () => {
     const suiteDir = pathJoin(__dirname, "../../third_party/wasi-test-suite/core");
     const entries = readdirSync(suiteDir);
     const UNSUPPORTED = [
-        "clock_get_res-monotonic.wasm",
         "fd_stat_get-stderr.wasm",
         "fd_stat_get-stdin.wasm",
         "fd_stat_get-stdout.wasm",
