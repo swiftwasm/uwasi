@@ -1,3 +1,5 @@
+[![.github/workflows/test.yml](https://github.com/swiftwasm/uwasi/actions/workflows/test.yml/badge.svg)](https://github.com/swiftwasm/uwasi/actions/workflows/test.yml)
+
 # μWASI
 
 This library provides a WASI implementation for Node.js and browsers in a tree-shaking friendly way.
