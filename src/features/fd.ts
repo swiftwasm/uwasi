@@ -1,10 +1,79 @@
 import { WASIAbi } from "../abi";
 import { WASIFeatureProvider, WASIOptions } from "../options";
 
-const iovec_t = {
-    size: 8,
-    bufferOffset: 0,
-    lengthOffset: 4,
+interface FdEntry {
+    writev(iovs: Uint8Array[]): number
+    readv(iovs: Uint8Array[]): number
+    close(): void
+}
+
+class WritableTextProxy implements FdEntry {
+    private decoder = new TextDecoder('utf-8');
+    constructor(private readonly handler: (lines: string) => void) { }
+
+    writev(iovs: Uint8Array[]): number {
+        const totalBufferSize = iovs.reduce((acc, iov) => acc + iov.byteLength, 0);
+        let offset = 0;
+        const concatBuffer = new Uint8Array(totalBufferSize);
+        for (const buffer of iovs) {
+            concatBuffer.set(buffer, offset);
+            offset += buffer.length;
+        }
+
+        const lines = this.decoder.decode(concatBuffer);
+        this.handler(lines);
+        return concatBuffer.length;
+    }
+    readv(_iovs: Uint8Array[]): number {
+        return 0;
+    }
+    close(): void {}
+}
+
+class ReadableTextProxy implements FdEntry {
+    private encoder = new TextEncoder();
+    private pending: Uint8Array | null;
+    constructor(private readonly consume: () => string) { }
+
+    writev(_iovs: Uint8Array[]): number {
+        return 0;
+    }
+    readv(iovs: Uint8Array[]): number {
+        let read = 0;
+        for (const buffer of iovs) {
+            let remaining = buffer.byteLength;
+            if (this.pending) {
+                const reading = Math.min(remaining, this.pending.byteLength);
+                buffer.set(this.pending.slice(0, reading), 0);
+                remaining -= reading;
+                if (remaining < this.pending.byteLength) {
+                    this.pending = this.pending.slice(reading);
+                    continue;
+                } else {
+                    this.pending = null;
+                }
+            }
+            while (remaining > 0) {
+                const newText = this.consume();
+                const bytes = this.encoder.encode(newText);
+                if (bytes.length == 0) {
+                    return read;
+                }
+                if (bytes.length > remaining) {
+                    buffer.set(bytes.slice(0, remaining), buffer.byteLength - remaining);
+                    this.pending = bytes.slice(remaining);
+                    read += remaining;
+                    remaining = 0;
+                } else {
+                    buffer.set(bytes, buffer.byteLength - remaining);
+                    read += bytes.length;
+                    remaining -= bytes.length;
+                }
+            }
+        }
+        return read;
+    }
+    close(): void {}
 }
 
 /**
@@ -34,15 +103,21 @@ const iovec_t = {
  */
 export function useStdio(
     useOptions: {
+        stdin: () => string,
         stdout: (lines: string) => void,
-        stderr: (lines: string) => void
+        stderr: (lines: string) => void,
     } = {
+            stdin: () => { return "" },
             stdout: console.log,
             stderr: console.error,
         }
 ): WASIFeatureProvider {
     return (options, abi, memoryView) => {
-        const decoder = new TextDecoder('utf-8');
+        const fdTable = [
+            new ReadableTextProxy(useOptions.stdin),
+            new WritableTextProxy(useOptions.stdout),
+            new WritableTextProxy(useOptions.stderr),
+        ]
         return {
             fd_prestat_get: (fd: number, buf: number) => {
                 return WASIAbi.WASI_ERRNO_BADF;
@@ -51,35 +126,21 @@ export function useStdio(
                 return WASIAbi.WASI_ERRNO_BADF;
             },
             fd_write: (fd: number, iovs: number, iovsLen: number, nwritten: number) => {
-                if (fd > 2) return WASIAbi.WASI_ERRNO_BADF;
-
+                const fdEntry = fdTable[fd];
+                if (!fdEntry) return WASIAbi.WASI_ERRNO_BADF;
                 const view = memoryView();
-                const partialBuffers: Uint8Array[] = [];
-                let iovsOffset = iovs;
-                let concatBufferSize = 0;
-
-                for (let i = 0; i < iovsLen; i++) {
-                    const offset = view.getUint32(iovsOffset + iovec_t.bufferOffset, true);
-                    const len = view.getUint32(iovsOffset + iovec_t.lengthOffset, true);
-
-                    partialBuffers.push(new Uint8Array(view.buffer, offset, len));
-                    iovsOffset += iovec_t.size;
-                    concatBufferSize += len;
-                }
-                const concatBuffer = new Uint8Array(concatBufferSize);
-                let offset = 0;
-                for (const buffer of partialBuffers) {
-                    concatBuffer.set(buffer, offset);
-                    offset += buffer.length;
-                }
-
-                const lines = decoder.decode(concatBuffer);
-                if (fd === 1) {
-                    useOptions.stdout(lines);
-                } else if (fd === 2) {
-                    useOptions.stderr(lines);
-                }
-                view.setUint32(nwritten, concatBuffer.length, true);
+                const iovsBuffers = abi.iovViews(view, iovs, iovsLen);
+                const writtenValue = fdEntry.writev(iovsBuffers);
+                view.setUint32(nwritten, writtenValue, true);
+                return WASIAbi.WASI_ESUCCESS;
+            },
+            fd_read: (fd: number, iovs: number, iovsLen: number, nread: number) => {
+                const fdEntry = fdTable[fd];
+                if (!fdEntry) return WASIAbi.WASI_ERRNO_BADF;
+                const view = memoryView();
+                const iovsBuffers = abi.iovViews(view, iovs, iovsLen);
+                const readValue = fdEntry.readv(iovsBuffers);
+                view.setUint32(nread, readValue, true);
                 return WASIAbi.WASI_ESUCCESS;
             }
         }

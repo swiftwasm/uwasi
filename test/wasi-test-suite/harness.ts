@@ -6,9 +6,17 @@ import { readFile } from "fs/promises";
 export async function runTest(filePath: string) {
     let stdout = "";
     let stderr = "";
+    const stdin = await (async () => {
+        const path = filePath.replace(/\.wasm$/, ".stdin");
+        if (!existsSync(path)) {
+            return "";
+        }
+        return await readFile(path, "utf8");
+    })()
     const features = [
         useEnviron, useArgs, useClock, useProc,
         useRandom(), useStdio({
+            stdin: () => { return stdin },
             stdout: (lines) => { stdout += lines },
             stderr: (lines) => { stderr += lines },
         })
@@ -35,7 +43,7 @@ export async function runTest(filePath: string) {
     const { instance } = await WebAssembly.instantiate(await readFile(filePath), {
         wasi_snapshot_preview1: wasi.wasiImport,
     });
-    let exitCode: number | undefined;
+    let exitCode: number;
     try {
         exitCode = wasi.start(instance);
     } catch (e) {
@@ -44,6 +52,8 @@ export async function runTest(filePath: string) {
             // SIGABRT (=0x6) signal. It results in exit code 0x80 + signal number in shell.
             // Reference: https://tldp.org/LDP/abs/html/exitcodes.html#EXITCODESREF
             exitCode = 0x86;
+        } else {
+            throw e;
         }
     }
     const expectedExitCode = await (async () => {

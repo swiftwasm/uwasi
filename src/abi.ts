@@ -97,6 +97,27 @@ export class WASIAbi {
     byteLength(value: string): number {
         return this.encoder.encode(value).length;
     }
+
+
+    private static readonly iovec_t = {
+        size: 8,
+        bufferOffset: 0,
+        lengthOffset: 4,
+    }
+
+    iovViews(memory: DataView, iovs: number, iovsLen: number): Uint8Array[] {
+        const iovsBuffers: Uint8Array[] = [];
+        let iovsOffset = iovs;
+
+        for (let i = 0; i < iovsLen; i++) {
+            const offset = memory.getUint32(iovsOffset + WASIAbi.iovec_t.bufferOffset, true);
+            const len = memory.getUint32(iovsOffset + WASIAbi.iovec_t.lengthOffset, true);
+
+            iovsBuffers.push(new Uint8Array(memory.buffer, offset, len));
+            iovsOffset += WASIAbi.iovec_t.size;
+        }
+        return iovsBuffers;
+    }
 }
 
 export class WASIProcExit {

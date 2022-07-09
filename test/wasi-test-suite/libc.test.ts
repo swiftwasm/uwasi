@@ -8,7 +8,6 @@ describe("wasi-test-suite-libc", () => {
     const UNSUPPORTED = [
         "clock_getres-monotonic.wasm",
         "clock_gettime-monotonic.wasm",
-        "stdin-hello.wasm",
         "ftruncate.wasm",
     ]
 
