@@ -1,4 +1,4 @@
-import { WASI, useEnviron, useArgs, useClock, useProc, useRandom, useStdio } from "../../src/index";
+import { WASI, useAll } from "../../src/index";
 import { WASIAbi } from "../../src/abi";
 import { existsSync } from "fs";
 import { readFile } from "fs/promises";
@@ -15,8 +15,7 @@ export async function runTest(filePath: string) {
         return await readFile(path, "utf8");
     })()
     const features = [
-        useEnviron, useArgs, useClock, useProc,
-        useRandom(), useStdio({
+        useAll({
             stdin: () => {
                 const result = stdin;
                 stdin = "";

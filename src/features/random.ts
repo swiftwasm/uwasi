@@ -7,18 +7,17 @@ import { defaultRandomFillSync } from "../platforms/crypto"
  */
 export function useRandom(
     useOptions: {
-        randomFillSync: (buffer: Uint8Array) => void,
-    } = {
-        randomFillSync: defaultRandomFillSync,
-    }
+        randomFillSync?: (buffer: Uint8Array) => void,
+    } = {}
 ): WASIFeatureProvider {
+    const randomFillSync = useOptions.randomFillSync || defaultRandomFillSync;
     return (options, abi, memoryView) => {
         return {
             random_get: (bufferOffset: number, length: number) => {
                 const view = memoryView();
 
                 const buffer = new Uint8Array(view.buffer, bufferOffset, length);
-                useOptions.randomFillSync(buffer);
+                randomFillSync(buffer);
 
                 return WASIAbi.WASI_ESUCCESS;
             },

@@ -6,20 +6,19 @@ import { useEnviron } from "./environ";
 import { useFS, useStdio } from "./fd";
 import { useProc } from "./proc";
 import { useRandom } from "./random";
-import { defaultRandomFillSync } from "../platforms/crypto"
 
-export function useAll(useOptions: { fs?: any, randomFillSync: (buffer: Uint8Array) => void } = {
-    fs: undefined, randomFillSync: defaultRandomFillSync,
-}): WASIFeatureProvider {
+type Options = (Parameters<typeof useFS>[0] | Parameters<typeof useStdio>[0]) & Parameters<typeof useRandom>[0]
+
+export function useAll(useOptions: Options = {}): WASIFeatureProvider {
     return (options: WASIOptions, abi: WASIAbi, memoryView: () => DataView) => {
         const features = [
             useEnviron, useArgs, useClock, useProc,
-            useRandom({ randomFillSync: useOptions.randomFillSync })
+            useRandom(useOptions)
         ];
-        if (useOptions.fs) {
+        if ("fs" in useOptions) {
             features.push(useFS({ fs: useOptions.fs }));
         } else {
-            features.push(useStdio());
+            features.push(useStdio(useOptions));
         }
         return features.reduce((acc, fn) => {
             return { ...acc, ...fn(options, abi, memoryView) };

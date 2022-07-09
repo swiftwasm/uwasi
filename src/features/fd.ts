@@ -108,20 +108,16 @@ export class ReadableTextProxy implements FdEntry {
  */
 export function useStdio(
     useOptions: {
-        stdin: () => string,
-        stdout: (lines: string) => void,
-        stderr: (lines: string) => void,
-    } = {
-            stdin: () => { return "" },
-            stdout: console.log,
-            stderr: console.error,
-        }
+        stdin?: () => string,
+        stdout?: (lines: string) => void,
+        stderr?: (lines: string) => void,
+    } = {}
 ): WASIFeatureProvider {
     return (options, abi, memoryView) => {
         const fdTable = [
-            new ReadableTextProxy(useOptions.stdin),
-            new WritableTextProxy(useOptions.stdout),
-            new WritableTextProxy(useOptions.stderr),
+            new ReadableTextProxy(useOptions.stdin || (() => { return "" })),
+            new WritableTextProxy(useOptions.stdout || console.log),
+            new WritableTextProxy(useOptions.stderr || console.error),
         ]
         return {
             fd_prestat_get: (fd: number, buf: number) => {
