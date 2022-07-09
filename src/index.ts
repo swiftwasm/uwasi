@@ -8,6 +8,7 @@ export * from "./features/environ";
 export * from "./features/fd";
 export * from "./features/proc";
 export * from "./features/random";
+export * from "./features/tracing";
 
 export class WASI {
     /**
