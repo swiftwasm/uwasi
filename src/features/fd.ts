@@ -30,28 +30,33 @@ class WritableTextProxy implements FdEntry {
     close(): void {}
 }
 
-class ReadableTextProxy implements FdEntry {
+export class ReadableTextProxy implements FdEntry {
     private encoder = new TextEncoder();
-    private pending: Uint8Array | null;
+    private pending: Uint8Array | null = null;
     constructor(private readonly consume: () => string) { }
 
     writev(_iovs: Uint8Array[]): number {
         return 0;
+    }
+    consumePending(pending: Uint8Array, requestLength: number): Uint8Array {
+        if (pending.byteLength < requestLength) {
+            this.pending = null
+            return pending;
+        } else {
+            const result = pending.slice(0, requestLength);
+            this.pending = pending.slice(requestLength);
+            return result;
+        }
     }
     readv(iovs: Uint8Array[]): number {
         let read = 0;
         for (const buffer of iovs) {
             let remaining = buffer.byteLength;
             if (this.pending) {
-                const reading = Math.min(remaining, this.pending.byteLength);
-                buffer.set(this.pending.slice(0, reading), 0);
-                remaining -= reading;
-                if (remaining < this.pending.byteLength) {
-                    this.pending = this.pending.slice(reading);
-                    continue;
-                } else {
-                    this.pending = null;
-                }
+                const consumed = this.consumePending(this.pending, remaining);
+                buffer.set(consumed, 0);
+                remaining -= consumed.byteLength;
+                read += consumed.byteLength;
             }
             while (remaining > 0) {
                 const newText = this.consume();

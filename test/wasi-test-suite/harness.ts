@@ -6,7 +6,7 @@ import { readFile } from "fs/promises";
 export async function runTest(filePath: string) {
     let stdout = "";
     let stderr = "";
-    const stdin = await (async () => {
+    let stdin = await (async () => {
         const path = filePath.replace(/\.wasm$/, ".stdin");
         if (!existsSync(path)) {
             return "";
@@ -16,7 +16,11 @@ export async function runTest(filePath: string) {
     const features = [
         useEnviron, useArgs, useClock, useProc,
         useRandom(), useStdio({
-            stdin: () => { return stdin },
+            stdin: () => {
+                const result = stdin;
+                stdin = "";
+                return result;
+            },
             stdout: (lines) => { stdout += lines },
             stderr: (lines) => { stderr += lines },
         })
