@@ -8,6 +8,15 @@ The system calls provided by this library are configurable.
 
 With minimal configuration, it provides WASI system calls which just return `WASI_ENOSYS`.
 
+## Features
+
+- No dependencies
+- Tree-shaking friendly
+  - 3 KB when minimal configuration
+  - 6 KB when all features enabled
+- Almost compatible interface with [Node.js WASI implementation](https://nodejs.org/api/wasi.html)
+- Well tested, thanks to [wasi-test-suite by Casper Beyer](https://github.com/caspervonb/wasi-test-suite)
+
 ## Installation
 
 ```bash
@@ -33,6 +42,10 @@ async function main() {
     });
     const exitCode = wasi.start(instance);
     console.log("exit code:", exitCode);
+
+/* With Reactor model
+    wasi.initialize(instance);
+*/
 }
 
 main()
@@ -48,18 +61,20 @@ const wasi = new WASI({
 });
 ```
 
-### With `args` and `clock` enabled
+### With `environ`, `args`, `clock`, `proc`, and `random` enabled
 
 ```js
 import { WASI, useArgs, useClock } from "uwasi";
 
 const wasi = new WASI({
     args: ["./a.out", "hello", "world"],
-    features: [useArgs, useClock],
+    features: [useEnviron, useArgs, useClock, useProc, useRandom()],
 });
 ```
 
 ### With `fd` (file descriptor) enabled only for stdio
+
+By default, `stdin` behaves like `/dev/null`, `stdout` and `stderr` print to the console.
 
 ```js
 import { WASI, useStdio } from "uwasi";
@@ -69,9 +84,26 @@ const wasi = new WASI({
 });
 ```
 
+You can use custom backends for stdio by passing handlers to `useStdio`.
+
+```js
+import { WASI, useStdio } from "uwasi";
+
+const inputs = ["Y", "N", "Y", "Y"];
+const wasi = new WASI({
+    features: [useStdio({
+        stdin: () => inputs.shift() || "",
+        stdout: (str) => document.body.innerHTML += str,
+        stderr: (str) => document.body.innerHTML += str,
+    })],
+});
+```
+
 ## Implementation Status
 
-| `API` | `Status` | `Notes` |
+Some of WASI system calls are not implemented yet. Contributions are welcome!
+
+| Syscall | Status | Notes |
 |-------|----------|---------|
 | `args_XXX` | ✅ | |
 | `clock_XXX` | ✅ | Monotonic clock is unavailable due to JS API limitation |
