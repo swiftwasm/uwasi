@@ -13,15 +13,39 @@ export async function runTest(filePath: string) {
             stderr: (lines) => { stderr += lines },
         })
     ];
+    const env = await (async () => {
+        const path = filePath.replace(/\.wasm$/, ".env");
+        if (!existsSync(path)) {
+            return {};
+        }
+        const data = await readFile(path, "utf8");
+        return data.split("\n").reduce((acc, line) => {
+            const components = line.trim().split("=");
+            if (components.length < 2) {
+                return acc;
+            }
+            return { ...acc, [components[0]]: components.slice(1).join("=") };
+        }, {});
+    })()
     const wasi = new WASI({
         args: [],
-        env: {},
+        env,
         features: features,
     });
     const { instance } = await WebAssembly.instantiate(await readFile(filePath), {
         wasi_snapshot_preview1: wasi.wasiImport,
     });
-    const exitCode = wasi.start(instance);
+    let exitCode: number | undefined;
+    try {
+        exitCode = wasi.start(instance);
+    } catch (e) {
+        if (e instanceof WebAssembly.RuntimeError && e.message == "unreachable") {
+            // When unreachable code is executed, many WebAssembly runtimes raise
+            // SIGABRT (=0x6) signal. It results in exit code 0x80 + signal number in shell.
+            // Reference: https://tldp.org/LDP/abs/html/exitcodes.html#EXITCODESREF
+            exitCode = 0x86;
+        }
+    }
     const expectedExitCode = await (async () => {
         const path = filePath.replace(/\.wasm$/, ".status");
         if (!existsSync(path)) {
