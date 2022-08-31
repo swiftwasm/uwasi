@@ -1,4 +1,5 @@
 import { WASIAbi, WASIProcExit } from "./abi";
+export { WASIProcExit } from "./abi";
 import { WASIOptions } from "./options"
 
 export * from "./features/all";

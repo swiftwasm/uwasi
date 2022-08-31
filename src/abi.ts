@@ -120,6 +120,9 @@ export class WASIAbi {
     }
 }
 
+/**
+ * An exception that is thrown when the process exits.
+ **/
 export class WASIProcExit {
     constructor(public readonly code: number) { }
 
