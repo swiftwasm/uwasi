@@ -121,5 +121,10 @@ export class WASIAbi {
 }
 
 export class WASIProcExit {
-    constructor(public readonly exitCode: number) { }
+    constructor(public readonly code: number) { }
+
+    /** @deprecated Use 'code' instead.
+     *  Has been renamed to have loose compatibility
+     *  with other implementations **/
+    get exitCode() { return this.code; }
 }

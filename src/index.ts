@@ -76,7 +76,7 @@ export class WASI {
             return WASIAbi.WASI_ESUCCESS;
         } catch (e) {
             if (e instanceof WASIProcExit) {
-                return e.exitCode;
+                return e.code;
             }
             throw e
         }
