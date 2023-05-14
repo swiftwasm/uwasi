@@ -17,7 +17,7 @@ class WritableTextProxy implements FdEntry {
         const concatBuffer = new Uint8Array(totalBufferSize);
         for (const buffer of iovs) {
             concatBuffer.set(buffer, offset);
-            offset += buffer.length;
+            offset += buffer.byteLength;
         }
 
         const lines = this.decoder.decode(concatBuffer);
