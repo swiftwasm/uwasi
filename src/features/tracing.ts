@@ -14,7 +14,7 @@ export function useTrace(features: WASIFeatureProvider[]): WASIFeatureProvider {
             }
             wasiImport[key] = (...args: any[]) => {
                 const result = original(...args);
-                console.log(`[uwasi-tracing] ${key}(${args.map(a => JSON.stringify(a)).join(', ')}) => ${result}`);
+                console.log(`[uwasi-tracing] ${key}(${args.join(', ')}) => ${result}`);
                 return result;
             }
         }
