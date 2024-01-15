@@ -10,7 +10,8 @@ export function useClock(options: WASIOptions, abi: WASIAbi, memoryView: () => D
             let resolutionValue: number;
             switch (clockId) {
                 case WASIAbi.WASI_CLOCK_MONOTONIC: {
-                    resolutionValue = 1;
+                    // https://developer.mozilla.org/en-US/docs/Web/API/Performance/now
+                    resolutionValue = 5000;
                     break;
                 }
                 case WASIAbi.WASI_CLOCK_REALTIME: {
@@ -25,9 +26,17 @@ export function useClock(options: WASIOptions, abi: WASIAbi, memoryView: () => D
             return WASIAbi.WASI_ESUCCESS;
         },
         clock_time_get: (clockId: number, precision: number, time: number) => {
-            // There is no standard way to guarantee monotonicity in JavaScript,
-            if (clockId !== WASIAbi.WASI_CLOCK_REALTIME) {
-                return WASIAbi.WASI_ENOSYS;
+            let nowMs: number = 0;
+            switch (clockId) {
+                case WASIAbi.WASI_CLOCK_MONOTONIC: {
+                    nowMs = performance.now();
+                    break;
+                }
+                case WASIAbi.WASI_CLOCK_REALTIME: {
+                    nowMs = Date.now();
+                    break;
+                }
+                default: return WASIAbi.WASI_ENOSYS;
             }
             const view = memoryView();
             if (BigInt) {
@@ -37,7 +46,7 @@ export function useClock(options: WASIOptions, abi: WASIAbi, memoryView: () => D
                     const ns = BigInt(msInt) * BigInt(1_000_000);
                     return ns + decimal;
                 };
-                const now = BigInt(msToNs(Date.now()));
+                const now = BigInt(msToNs(nowMs));
                 view.setBigUint64(time, now, true);
             } else {
                 // Fallback to two 32-bit numbers losing precision
