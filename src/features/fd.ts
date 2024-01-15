@@ -120,6 +120,19 @@ export function useStdio(
             new WritableTextProxy(useOptions.stderr || console.error),
         ]
         return {
+            fd_fdstat_get: (fd: number, buf: number) => {
+                const fdEntry = fdTable[fd];
+                if (!fdEntry) return WASIAbi.WASI_ERRNO_BADF;
+                const view = memoryView();
+                abi.writeFdstat(view, buf, WASIAbi.WASI_FILETYPE_CHARACTER_DEVICE, 0)
+                return WASIAbi.WASI_ESUCCESS;
+            },
+            fd_filestat_get: (fd: number, buf: number) => {
+                const fdEntry = fdTable[fd];
+                if (!fdEntry) return WASIAbi.WASI_ERRNO_BADF;
+                const view = memoryView();
+                abi.writeFilestat(view, buf, WASIAbi.WASI_FILETYPE_CHARACTER_DEVICE);
+            },
             fd_prestat_get: (fd: number, buf: number) => {
                 return WASIAbi.WASI_ERRNO_BADF;
             },

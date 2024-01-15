@@ -25,6 +25,11 @@ export class WASIAbi {
      */
     static readonly WASI_CLOCK_MONOTONIC = 1;
 
+    /**
+     * The file descriptor or file refers to a character device inode.
+     */
+    static readonly WASI_FILETYPE_CHARACTER_DEVICE = 2;
+
     static readonly IMPORT_FUNCTIONS = [
         "args_get",
         "args_sizes_get",
@@ -117,6 +122,23 @@ export class WASIAbi {
             iovsOffset += WASIAbi.iovec_t.size;
         }
         return iovsBuffers;
+    }
+
+    writeFilestat(memory: DataView, ptr: number, filetype: number): void {
+        memory.setBigUint64(ptr, /* dev */ BigInt(0), true);
+        memory.setBigUint64(ptr + 8, /* ino */ BigInt(0), true);
+        memory.setUint8(ptr + 16, filetype);
+        memory.setUint32(ptr + 24, /* nlink */ 0, true);
+        memory.setBigUint64(ptr + 32, /* size */ BigInt(0), true);
+        memory.setBigUint64(ptr + 40, /* atim */ BigInt(0), true);
+        memory.setBigUint64(ptr + 48, /* mtim */ BigInt(0), true);
+    }
+
+    writeFdstat(memory: DataView, ptr: number, filetype: number, flags: number): void {
+        memory.setUint8(ptr, filetype);
+        memory.setUint16(ptr + 2, flags, true);
+        memory.setBigUint64(ptr + 8, /* rights_base */ BigInt(0), true);
+        memory.setBigUint64(ptr + 16, /* rights_inheriting */ BigInt(0), true);
     }
 }
 
