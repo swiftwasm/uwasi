@@ -82,6 +82,7 @@ export class WASIAbi {
 
         "sched_yield",
 
+        "sock_accept",
         "sock_recv",
         "sock_send",
         "sock_shutdown",
