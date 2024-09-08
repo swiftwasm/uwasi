@@ -9,7 +9,10 @@ interface FdEntry {
 
 class WritableTextProxy implements FdEntry {
     private decoder = new TextDecoder('utf-8');
-    constructor(private readonly handler: (lines: string) => void) { }
+    constructor(
+        private readonly handler: (lines: string | Uint8Array) => void,
+        private readonly outputBuffers: boolean
+    ) { }
 
     writev(iovs: Uint8Array[]): number {
         const totalBufferSize = iovs.reduce((acc, iov) => acc + iov.byteLength, 0);
@@ -20,8 +23,13 @@ class WritableTextProxy implements FdEntry {
             offset += buffer.byteLength;
         }
 
-        const lines = this.decoder.decode(concatBuffer);
-        this.handler(lines);
+        if (this.outputBuffers) {
+            this.handler(concatBuffer);
+        } else {
+            const lines = this.decoder.decode(concatBuffer);
+            this.handler(lines);
+        }
+
         return concatBuffer.length;
     }
     readv(_iovs: Uint8Array[]): number {
@@ -33,7 +41,7 @@ class WritableTextProxy implements FdEntry {
 export class ReadableTextProxy implements FdEntry {
     private encoder = new TextEncoder();
     private pending: Uint8Array | null = null;
-    constructor(private readonly consume: () => string) { }
+    constructor(private readonly consume: () => string | Uint8Array) { }
 
     writev(_iovs: Uint8Array[]): number {
         return 0;
@@ -59,8 +67,15 @@ export class ReadableTextProxy implements FdEntry {
                 read += consumed.byteLength;
             }
             while (remaining > 0) {
-                const newText = this.consume();
-                const bytes = this.encoder.encode(newText);
+                const newData = this.consume();
+                let bytes: Uint8Array;
+
+                if (newData instanceof Uint8Array) {
+                    bytes = newData;
+                } else {
+                    bytes = this.encoder.encode(newData);
+                }
+
                 if (bytes.length == 0) {
                     return read;
                 }
@@ -108,16 +123,19 @@ export class ReadableTextProxy implements FdEntry {
  */
 export function useStdio(
     useOptions: {
-        stdin?: () => string,
-        stdout?: (lines: string) => void,
-        stderr?: (lines: string) => void,
+        stdin?: () => string | Uint8Array,
+        stdout?: (lines: string | Uint8Array) => void,
+        stderr?: (lines: string | Uint8Array) => void,
+        outputBuffers?: boolean,
     } = {}
 ): WASIFeatureProvider {
     return (options, abi, memoryView) => {
+        const outputBuffers = useOptions.outputBuffers || false;
+
         const fdTable = [
             new ReadableTextProxy(useOptions.stdin || (() => { return "" })),
-            new WritableTextProxy(useOptions.stdout || console.log),
-            new WritableTextProxy(useOptions.stderr || console.error),
+            new WritableTextProxy(useOptions.stdout || console.log, outputBuffers),
+            new WritableTextProxy(useOptions.stderr || console.error, outputBuffers),
         ]
         return {
             fd_fdstat_get: (fd: number, buf: number) => {
