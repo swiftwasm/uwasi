@@ -99,6 +99,20 @@ const wasi = new WASI({
 });
 ```
 
+By default, the `stdout` and `stderr` handlers are passed strings. You can pass `outputBuffers: true` to get `Uint8Array` buffers instead. Along with that, you can also pass `Uint8Array` buffers to `stdin`.
+
+```js
+import { WASI, useStdio } from "uwasi";
+const wasi = new WASI({
+    features: [useStdio({
+        outputBuffers: true,
+        stdin: () => new Uint8Array([1, 2, 3, 4, 5]),
+        stdout: (buf) => console.log(buf),
+        stderr: (buf) => console.error(buf),
+    })],
+});
+```
+
 ## Implementation Status
 
 Some of WASI system calls are not implemented yet. Contributions are welcome!
