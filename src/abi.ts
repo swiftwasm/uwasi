@@ -122,9 +122,11 @@ export class WASIAbi {
   ];
 
   private encoder: TextEncoder;
+  private decoder: TextDecoder;
 
   constructor() {
     this.encoder = new TextEncoder();
+    this.decoder = new TextDecoder();
   }
 
   writeString(memory: DataView, value: string, offset: number): number {
@@ -133,6 +135,12 @@ export class WASIAbi {
     buffer.set(bytes);
     return bytes.length;
   }
+
+  readString(memory: DataView, ptr: number, len: number): string {
+    const buffer = new Uint8Array(memory.buffer, ptr, len);
+    return this.decoder.decode(buffer);
+  }
+  
   byteLength(value: string): number {
     return this.encoder.encode(value).length;
   }

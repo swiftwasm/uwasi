@@ -814,16 +814,14 @@ export function useMemoryFS(
         opened_fd: number
       ) => {
         const view = memoryView();
-        let path = "";
-        for (let i = 0; i < pathLen; i++) {
-          path += String.fromCharCode(view.getUint8(pathPtr + i));
-        }
 
         if (dirfd < 3) return WASIAbi.WASI_ERRNO_NOTDIR;
 
         const dirEntry = getFileFromFD(dirfd);
         if (!dirEntry || dirEntry.node.type !== "dir")
           return WASIAbi.WASI_ERRNO_NOTDIR;
+
+        const path = abi.readString(view, pathPtr, pathLen);
 
         const guestPath =
           (dirEntry.path.endsWith("/") ? dirEntry.path : dirEntry.path + "/") +
@@ -876,16 +874,14 @@ export function useMemoryFS(
         opened_fd: number
       ) => {
         const view = memoryView();
-        let path = "";
-        for (let i = 0; i < pathLen; i++) {
-          path += String.fromCharCode(view.getUint8(pathPtr + i));
-        }
 
         if (dirfd < 3) return WASIAbi.WASI_ERRNO_NOTDIR;
 
         const dirEntry = getFileFromFD(dirfd);
         if (!dirEntry || dirEntry.node.type !== "dir")
           return WASIAbi.WASI_ERRNO_NOTDIR;
+
+        const path = abi.readString(view, pathPtr, pathLen);
 
         const guestPath =
           (dirEntry.path.endsWith("/") ? dirEntry.path : dirEntry.path + "/") +
@@ -938,18 +934,14 @@ export function useMemoryFS(
       ) => {
         const view = memoryView();
 
-        // Read the relative path from WASM memory.
-        let guestRelPath = "";
-        for (let i = 0; i < pathLen; i++) {
-          guestRelPath += String.fromCharCode(view.getUint8(pathPtr + i));
-        }
-
         // Get the base FD entry; it must be a directory.
         const file = getFileFromFD(fd);
         if (!file) return WASIAbi.WASI_ERRNO_BADF;
         if (file.node.type !== "dir") {
           return WASIAbi.WASI_ERRNO_NOTDIR;
         }
+
+        const guestRelPath = abi.readString(view, pathPtr, pathLen);
 
         // Compute the full guest path.
         const basePath = file.path;
