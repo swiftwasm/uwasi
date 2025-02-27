@@ -6,7 +6,7 @@ export * from "./features/all";
 export * from "./features/args";
 export * from "./features/clock";
 export * from "./features/environ";
-export { useFS, useStdio } from "./features/fd";
+export { useFS, useStdio, useMemoryFS } from "./features/fd";
 export * from "./features/proc";
 export * from "./features/random";
 export * from "./features/tracing";
@@ -22,11 +22,20 @@ export class WASI {
     private isStarted: boolean = false;
 
     constructor(options?: WASIOptions) {
-        this.wasiImport = {}
+        this.wasiImport = {};
         const abi = new WASIAbi();
         if (options && options.features) {
+            const importProviders: Record<string, string> = {};
             for (const useFeature of options.features) {
+                const featureName = useFeature.name || 'Unknown feature';
                 const imports = useFeature(options, abi, this.view.bind(this));
+                for (const key in imports) {
+                    if (key in this.wasiImport) {
+                        const previousProvider = importProviders[key] || 'Unknown feature';
+                        throw new Error(`Import conflict: Function '${key}' is already provided by '${previousProvider}' and is being redefined by '${featureName}'`);
+                    }
+                    importProviders[key] = featureName;
+                }
                 this.wasiImport = { ...this.wasiImport, ...imports };
             }
         }
