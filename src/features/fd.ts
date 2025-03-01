@@ -11,7 +11,7 @@ class WritableTextProxy implements FdEntry {
   private decoder = new TextDecoder("utf-8");
   constructor(
     private readonly handler: (lines: string | Uint8Array) => void,
-    private readonly outputBuffers: boolean
+    private readonly outputBuffers: boolean,
   ) {}
 
   writev(iovs: Uint8Array[]): number {
@@ -104,7 +104,7 @@ export type StdIoOptions = {
 };
 
 function bindStdio(
-  useOptions: StdIoOptions = {}
+  useOptions: StdIoOptions = {},
 ): (ReadableTextProxy | WritableTextProxy)[] {
   const outputBuffers = useOptions.outputBuffers || false;
   return [
@@ -112,7 +112,7 @@ function bindStdio(
       useOptions.stdin ||
         (() => {
           return "";
-        })
+        }),
     ),
     new WritableTextProxy(useOptions.stdout || console.log, outputBuffers),
     new WritableTextProxy(useOptions.stderr || console.error, outputBuffers),
@@ -171,7 +171,7 @@ export function useStdio(useOptions: StdIoOptions = {}): WASIFeatureProvider {
         fd: number,
         iovs: number,
         iovsLen: number,
-        nwritten: number
+        nwritten: number,
       ) => {
         const fdEntry = fdTable[fd];
         if (!fdEntry) return WASIAbi.WASI_ERRNO_BADF;
@@ -514,12 +514,12 @@ export function useMemoryFS(
   useOptions: {
     withFileSystem?: MemoryFileSystem;
     withStdIo?: StdIoOptions;
-  } = {}
+  } = {},
 ): WASIFeatureProvider {
   return (
     wasiOptions: WASIOptions,
     abi: WASIAbi,
-    memoryView: () => DataView
+    memoryView: () => DataView,
   ) => {
     const fileSystem =
       useOptions.withFileSystem || new MemoryFileSystem(wasiOptions.preopens);
@@ -618,7 +618,7 @@ export function useMemoryFS(
         fd: number,
         iovs: number,
         iovsLen: number,
-        nwritten: number
+        nwritten: number,
       ) => {
         const view = memoryView();
         const iovViews = abi.iovViews(view, iovs, iovsLen);
@@ -643,7 +643,7 @@ export function useMemoryFS(
         let pos = file.position;
         const dataToWrite = iovViews.reduce(
           (acc, buf) => acc + buf.byteLength,
-          0
+          0,
         );
         const requiredLength = pos + dataToWrite;
         let newContent: Uint8Array;
@@ -684,7 +684,7 @@ export function useMemoryFS(
         fd: number,
         offset: bigint,
         whence: number,
-        newOffset: number
+        newOffset: number,
       ) => {
         const view = memoryView();
         if (fd < 3) return WASIAbi.WASI_ERRNO_BADF;
@@ -811,7 +811,7 @@ export function useMemoryFS(
         _fs_rights_base: bigint,
         _fs_rights_inheriting: bigint,
         _fdflags: number,
-        opened_fd: number
+        opened_fd: number,
       ) => {
         const view = memoryView();
 
@@ -871,7 +871,7 @@ export function useMemoryFS(
         _fs_rights_base: bigint,
         _fs_rights_inheriting: bigint,
         _fdflags: number,
-        opened_fd: number
+        opened_fd: number,
       ) => {
         const view = memoryView();
 
@@ -908,7 +908,7 @@ export function useMemoryFS(
           if (!(oflags & O_CREAT)) return WASIAbi.WASI_ERRNO_NOENT;
           target = fileSystem.createFileIn(
             dirEntry.node as DirectoryNode,
-            path
+            path,
           );
         }
 
@@ -930,7 +930,7 @@ export function useMemoryFS(
         flags: number,
         pathPtr: number,
         pathLen: number,
-        buf: number
+        buf: number,
       ) => {
         const view = memoryView();
 
