@@ -1,6 +1,5 @@
-import * as crypto from "crypto"
+import * as crypto from "crypto";
 
 export const defaultRandomFillSync = (buffer: Uint8Array) => {
-    crypto.randomFillSync(buffer)
-}
-
+  crypto.randomFillSync(buffer);
+};

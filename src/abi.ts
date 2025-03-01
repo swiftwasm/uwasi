@@ -140,7 +140,7 @@ export class WASIAbi {
     const buffer = new Uint8Array(memory.buffer, ptr, len);
     return this.decoder.decode(buffer);
   }
-  
+
   byteLength(value: string): number {
     return this.encoder.encode(value).length;
   }
@@ -158,11 +158,11 @@ export class WASIAbi {
     for (let i = 0; i < iovsLen; i++) {
       const offset = memory.getUint32(
         iovsOffset + WASIAbi.iovec_t.bufferOffset,
-        true
+        true,
       );
       const len = memory.getUint32(
         iovsOffset + WASIAbi.iovec_t.lengthOffset,
-        true
+        true,
       );
 
       iovsBuffers.push(new Uint8Array(memory.buffer, offset, len));
@@ -185,7 +185,7 @@ export class WASIAbi {
     memory: DataView,
     ptr: number,
     filetype: number,
-    flags: number
+    flags: number,
   ): void {
     memory.setUint8(ptr, filetype);
     memory.setUint16(ptr + 2, flags, true);

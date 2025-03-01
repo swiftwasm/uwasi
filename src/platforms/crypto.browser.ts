@@ -1,4 +1,3 @@
 export const defaultRandomFillSync = (buffer: Uint8Array) => {
-    crypto.getRandomValues(buffer)
-}
-
+  crypto.getRandomValues(buffer);
+};
