@@ -96,7 +96,7 @@ export class ReadableTextProxy implements FdEntry {
   close(): void {}
 }
 
-export type StdIoOptions = {
+export type StdioOptions = {
   stdin?: () => string | Uint8Array;
   stdout?: (lines: string | Uint8Array) => void;
   stderr?: (lines: string | Uint8Array) => void;
@@ -104,7 +104,7 @@ export type StdIoOptions = {
 };
 
 function bindStdio(
-  useOptions: StdIoOptions = {},
+  useOptions: StdioOptions = {},
 ): (ReadableTextProxy | WritableTextProxy)[] {
   const outputBuffers = useOptions.outputBuffers || false;
   return [
@@ -144,7 +144,7 @@ function bindStdio(
  *
  * This provides `fd_write`, `fd_prestat_get` and `fd_prestat_dir_name` implementations to make libc work with minimal effort.
  */
-export function useStdio(useOptions: StdIoOptions = {}): WASIFeatureProvider {
+export function useStdio(useOptions: StdioOptions = {}): WASIFeatureProvider {
   return (options, abi, memoryView) => {
     const fdTable = bindStdio(useOptions);
     return {
@@ -496,7 +496,7 @@ export class MemoryFileSystem {
  * const wasi = new WASI({
  *   features: [
  *     useMemoryFS({
- *       withStdIo: {
+ *       withStdio: {
  *         stdout: (lines) => document.write(lines),
  *         stderr: (lines) => document.write(lines),
  *       }
@@ -507,13 +507,13 @@ export class MemoryFileSystem {
  *
  * @param useOptions - Configuration options for the memory file system
  * @param useOptions.withFileSystem - Optional pre-configured file system instance
- * @param useOptions.withStdIo - Optional standard I/O configuration
+ * @param useOptions.withStdio - Optional standard I/O configuration
  * @returns A WASI feature provider implementing file system functionality
  */
 export function useMemoryFS(
   useOptions: {
     withFileSystem?: MemoryFileSystem;
-    withStdIo?: StdIoOptions;
+    withStdio?: StdioOptions;
   } = {},
 ): WASIFeatureProvider {
   return (
@@ -525,7 +525,7 @@ export function useMemoryFS(
       useOptions.withFileSystem || new MemoryFileSystem(wasiOptions.preopens);
     const files: { [fd: FileDescriptor]: OpenFile } = {};
 
-    bindStdio(useOptions.withStdIo || {}).forEach((entry, fd) => {
+    bindStdio(useOptions.withStdio || {}).forEach((entry, fd) => {
       files[fd] = {
         node: { type: "character", kind: "stdio", entry },
         position: 0,
