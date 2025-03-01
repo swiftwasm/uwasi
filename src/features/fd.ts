@@ -275,13 +275,13 @@ export class MemoryFileSystem {
       const data = new TextEncoder().encode(content);
       this.createFile(path, data);
       return;
-    } else if (content instanceof Blob) {
+    } else if (globalThis.Blob && content instanceof Blob) {
       return content.arrayBuffer().then((buffer) => {
         const data = new Uint8Array(buffer);
         this.createFile(path, data);
       });
     } else {
-      this.createFile(path, content);
+      this.createFile(path, content as Uint8Array);
       return;
     }
   }
