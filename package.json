@@ -8,7 +8,7 @@
     "./lib/esm/platforms/crypto.js": "./lib/esm/platforms/crypto.browser.js"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.esm.json && tsc -p tsconfig.cjs.json",
+    "build": "tsc -p tsconfig.esm.json && tsc -p tsconfig.cjs.json && echo '{ \"type\": \"module\" }' > lib/esm/package.json",
     "test": "jest",
     "format": "prettier --write ./src ./test",
     "prepare": "npm run build"
