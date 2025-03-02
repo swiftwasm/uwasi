@@ -835,18 +835,15 @@ export function useMemoryFS(
         }
 
         let target = fileSystem.resolve(dirEntry.node as DirectoryNode, path);
-        const O_CREAT = 1 << 0,
-          O_EXCL = 1 << 1,
-          O_TRUNC = 1 << 2;
 
         if (target) {
-          if (oflags & O_EXCL) return WASIAbi.WASI_ERRNO_EXIST;
-          if (oflags & O_TRUNC) {
+          if (oflags & WASIAbi.WASI_OFLAGS_EXCL) return WASIAbi.WASI_ERRNO_EXIST;
+          if (oflags & WASIAbi.WASI_OFLAGS_TRUNC) {
             if (target.type !== "file") return WASIAbi.WASI_ERRNO_INVAL;
             (target as FileNode).content = new Uint8Array(0);
           }
         } else {
-          if (!(oflags & O_CREAT)) return WASIAbi.WASI_ERRNO_NOENT;
+          if (!(oflags & WASIAbi.WASI_OFLAGS_CREAT)) return WASIAbi.WASI_ERRNO_NOENT;
           target = fileSystem.createFileIn(
             dirEntry.node as DirectoryNode,
             path,
