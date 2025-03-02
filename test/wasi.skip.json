@@ -1,0 +1,54 @@
+{
+  "WASI Rust tests": {
+    "sched_yield": "not implemented yet",
+    "poll_oneoff_stdio": "not implemented yet",
+    "path_rename": "not implemented yet",
+    "fd_advise": "not implemented yet",
+    "path_exists": "not implemented yet",
+    "path_open_dirfd_not_dir": "not implemented yet",
+    "fd_filestat_set": "not implemented yet",
+    "symlink_create": "not implemented yet",
+    "overwrite_preopen": "not implemented yet",
+    "path_open_read_write": "not implemented yet",
+    "path_rename_dir_trailing_slashes": "not implemented yet",
+    "fd_flags_set": "not implemented yet",
+    "path_filestat": "not implemented yet",
+    "path_link": "not implemented yet",
+    "fd_fdstat_set_rights": "not implemented yet",
+    "readlink": "not implemented yet",
+    "unlink_file_trailing_slashes": "not implemented yet",
+    "path_symlink_trailing_slashes": "not implemented yet",
+    "dangling_symlink": "not implemented yet",
+    "dir_fd_op_failures": "not implemented yet",
+    "file_allocate": "not implemented yet",
+    "nofollow_errors": "not implemented yet",
+    "path_open_preopen": "not implemented yet",
+    "fd_readdir": "not implemented yet",
+    "directory_seek": "not implemented yet",
+    "symlink_filestat": "not implemented yet",
+    "symlink_loop": "not implemented yet",
+    "interesting_paths": "not implemented yet",
+
+    "stdio": "fail",
+    "renumber": "fail",
+    "remove_nonempty_directory": "fail",
+    "remove_directory_trailing_slashes": "fail",
+    "fstflags_validate": "fail",
+    "file_unbuffered_write": "fail",
+    "file_seek_tell": "fail",
+    "file_pread_pwrite": "fail",
+    "close_preopen": "fail"
+  },
+  "WASI C tests": {
+    "sock_shutdown-invalid_fd": "not implemented yet",
+    "stat-dev-ino": "not implemented yet",
+    "sock_shutdown-not_sock": "not implemented yet",
+    "fdopendir-with-access": "not implemented yet",
+
+    "pwrite-with-append": "fail",
+    "pwrite-with-access": "fail",
+    "pread-with-access": "fail"
+  },
+  "WASI AssemblyScript tests": {
+  }
+} 

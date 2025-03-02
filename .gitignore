@@ -1,3 +1,4 @@
 node_modules
 /lib
 /examples/build
+/examples/package-lock.json

@@ -62,6 +62,22 @@ export class WASIAbi {
    * The file descriptor or file refers to a regular file inode.
    */
   static readonly WASI_FILETYPE_REGULAR_FILE = 4;
+  /**
+   * Create file if it does not exist.
+   */
+  static readonly WASI_OFLAGS_CREAT = 1 << 0;
+  /**
+   * Open directory.
+   */
+  static readonly WASI_OFLAGS_DIRECTORY = 1 << 1;
+  /**
+   * Fail if not a directory.
+   */
+  static readonly WASI_OFLAGS_EXCL = 1 << 2;
+  /**
+   * Truncate to zero length.
+   */
+  static readonly WASI_OFLAGS_TRUNC = 1 << 3;
 
   static readonly IMPORT_FUNCTIONS = [
     "args_get",

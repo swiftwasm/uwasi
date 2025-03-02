@@ -1,6 +1,6 @@
-import { WASIAbi } from "../abi";
-import { WASIFeatureProvider } from "../options";
-import { defaultRandomFillSync } from "../platforms/crypto";
+import { WASIAbi } from "../abi.js";
+import { WASIFeatureProvider } from "../options.js";
+import { defaultRandomFillSync } from "../platforms/crypto.js";
 
 /**
  * Create a feature provider that provides `random_get` with `crypto` APIs as backend by default.

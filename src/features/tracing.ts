@@ -1,4 +1,4 @@
-import { WASIFeatureProvider } from "../options";
+import { WASIFeatureProvider } from "../options.js";
 
 export function useTrace(features: WASIFeatureProvider[]): WASIFeatureProvider {
   return (options, abi, memoryView) => {

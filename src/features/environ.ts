@@ -1,5 +1,5 @@
-import { WASIAbi } from "../abi";
-import { WASIOptions } from "../options";
+import { WASIAbi } from "../abi.js";
+import { WASIOptions } from "../options.js";
 
 /**
  * A feature provider that provides `environ_get` and `environ_sizes_get`
