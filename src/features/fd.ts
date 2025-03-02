@@ -803,65 +803,6 @@ export function useMemoryFS(
         return WASIAbi.WASI_ESUCCESS;
       },
 
-      fd_open: (
-        dirfd: number,
-        pathPtr: number,
-        pathLen: number,
-        oflags: number,
-        _fs_rights_base: bigint,
-        _fs_rights_inheriting: bigint,
-        _fdflags: number,
-        opened_fd: number,
-      ) => {
-        const view = memoryView();
-
-        if (dirfd < 3) return WASIAbi.WASI_ERRNO_NOTDIR;
-
-        const dirEntry = getFileFromFD(dirfd);
-        if (!dirEntry || dirEntry.node.type !== "dir")
-          return WASIAbi.WASI_ERRNO_NOTDIR;
-
-        const path = abi.readString(view, pathPtr, pathLen);
-
-        const guestPath =
-          (dirEntry.path.endsWith("/") ? dirEntry.path : dirEntry.path + "/") +
-          path;
-
-        const existing = getFileFromPath(guestPath);
-        if (existing) {
-          view.setUint32(opened_fd, existing.fd, true);
-          return WASIAbi.WASI_ESUCCESS;
-        }
-
-        let target = fileSystem.resolve(dirEntry.node, path);
-        const O_CREAT = 1 << 0,
-          O_EXCL = 1 << 1,
-          O_TRUNC = 1 << 2;
-
-        if (target) {
-          if (oflags & O_EXCL) return WASIAbi.WASI_ERRNO_EXIST;
-          if (oflags & O_TRUNC) {
-            if (target.type !== "file") return WASIAbi.WASI_ERRNO_INVAL;
-            target.content = new Uint8Array(0);
-          }
-        } else {
-          if (!(oflags & O_CREAT)) return WASIAbi.WASI_ERRNO_NOENT;
-          target = fileSystem.createFileIn(dirEntry.node, path);
-        }
-
-        files[nextFd] = {
-          node: target,
-          position: 0,
-          isPreopen: false,
-          path: guestPath,
-          fd: nextFd,
-        };
-
-        view.setUint32(opened_fd, nextFd, true);
-        nextFd++;
-        return WASIAbi.WASI_ESUCCESS;
-      },
-
       path_open: (
         dirfd: number,
         _dirflags: number,
