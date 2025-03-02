@@ -7,7 +7,8 @@ import { useMemoryFS } from "./fd.js";
 import { useProc } from "./proc.js";
 import { useRandom } from "./random.js";
 
-type Options = Parameters<typeof useMemoryFS>[0] & Parameters<typeof useRandom>[0];
+type Options = Parameters<typeof useMemoryFS>[0] &
+  Parameters<typeof useRandom>[0];
 
 export function useAll(useOptions: Options = {}): WASIFeatureProvider {
   return (options: WASIOptions, abi: WASIAbi, memoryView: () => DataView) => {

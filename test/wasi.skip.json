@@ -49,6 +49,5 @@
     "pwrite-with-access": "fail",
     "pread-with-access": "fail"
   },
-  "WASI AssemblyScript tests": {
-  }
-} 
+  "WASI AssemblyScript tests": {}
+}

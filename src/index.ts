@@ -6,7 +6,12 @@ export * from "./features/all.js";
 export * from "./features/args.js";
 export * from "./features/clock.js";
 export * from "./features/environ.js";
-export { useFS, useStdio, useMemoryFS, MemoryFileSystem } from "./features/fd.js";
+export {
+  useFS,
+  useStdio,
+  useMemoryFS,
+  MemoryFileSystem,
+} from "./features/fd.js";
 export * from "./features/proc.js";
 export * from "./features/random.js";
 export * from "./features/tracing.js";

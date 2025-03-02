@@ -1,6 +1,6 @@
 import { ReadableTextProxy } from "../lib/esm/features/fd.js";
-import { describe, it } from 'node:test';
-import assert from 'node:assert';
+import { describe, it } from "node:test";
+import assert from "node:assert";
 
 describe("fd.ReadableTextProxy", () => {
   it("readv single buffer", () => {
