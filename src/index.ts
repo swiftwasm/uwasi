@@ -6,7 +6,7 @@ export * from "./features/all";
 export * from "./features/args";
 export * from "./features/clock";
 export * from "./features/environ";
-export { useFS, useStdio, useMemoryFS } from "./features/fd";
+export { useFS, useStdio, useMemoryFS, MemoryFileSystem } from "./features/fd";
 export * from "./features/proc";
 export * from "./features/random";
 export * from "./features/tracing";
