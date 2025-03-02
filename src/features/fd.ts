@@ -304,7 +304,7 @@ export class MemoryFileSystem {
    * @param node The node to set
    */
   setNode(path: string, node: FSNode): void {
-    const normalizedPath = this.normalizePath(path);
+    const normalizedPath = normalizePath(path);
     const parts = normalizedPath.split("/").filter((p) => p.length > 0);
 
     if (parts.length === 0) {
@@ -345,7 +345,7 @@ export class MemoryFileSystem {
    * @returns The node at the path, or null if not found
    */
   lookup(path: string): FSNode | null {
-    const normalizedPath = this.normalizePath(path);
+    const normalizedPath = normalizePath(path);
     if (normalizedPath === "/") return this.root;
 
     const parts = normalizedPath.split("/").filter((p) => p.length > 0);
@@ -367,7 +367,7 @@ export class MemoryFileSystem {
    * @returns The resolved node, or null if not found
    */
   resolve(dir: DirectoryNode, relativePath: string): FSNode | null {
-    const normalizedPath = this.normalizePath(relativePath);
+    const normalizedPath = normalizePath(relativePath);
     const parts = normalizedPath.split("/").filter((p) => p.length > 0);
     let current: FSNode = dir;
 
@@ -391,7 +391,7 @@ export class MemoryFileSystem {
    * @returns The directory node
    */
   ensureDir(path: string): DirectoryNode {
-    const normalizedPath = this.normalizePath(path);
+    const normalizedPath = normalizePath(path);
     const parts = normalizedPath.split("/").filter((p) => p.length > 0);
     let current: DirectoryNode = this.root;
 
@@ -418,7 +418,7 @@ export class MemoryFileSystem {
    * @returns The created file node
    */
   createFileIn(dir: DirectoryNode, relativePath: string): FileNode {
-    const normalizedPath = this.normalizePath(relativePath);
+    const normalizedPath = normalizePath(relativePath);
     const parts = normalizedPath.split("/").filter((p) => p.length > 0);
 
     if (parts.length === 0) {
@@ -446,24 +446,45 @@ export class MemoryFileSystem {
     return fileNode;
   }
 
-  /**
-   * Normalizes a path by removing duplicate slashes and trailing slashes.
-   * @param path Path to normalize
-   * @returns Normalized path
-   */
-  private normalizePath(path: string): string {
-    // Handle empty path
-    if (!path) return "/";
+  removeEntry(path: string): void {
+    const normalizedPath = normalizePath(path);
+    const parts = normalizedPath.split("/").filter((p) => p.length > 0);
+    let parentDir = this.root;
+    for (let i = 0; i < parts.length - 1; i++) {
+      const part = parts[i];
+      if (parentDir.type !== "dir") return;
+      parentDir = parentDir.entries[part] as DirectoryNode;
+    }
 
-    // Ensure path starts with a slash
-    const withLeadingSlash = path.startsWith("/") ? path : `/${path}`;
-
-    // Remove duplicate slashes and normalize
-    const normalized = withLeadingSlash.replace(/\/+/g, "/");
-
-    // Remove trailing slash unless it's the root path
-    return normalized === "/" ? normalized : normalized.replace(/\/+$/, "");
+    const fileName = parts[parts.length - 1];
+    delete parentDir.entries[fileName];
   }
+}
+
+/**
+ * Normalizes a path by removing duplicate slashes and trailing slashes.
+ * @param path Path to normalize
+ * @returns Normalized path
+ */
+function normalizePath(path: string): string {
+  // Handle empty path
+  if (!path) return "/";
+
+  const parts = path.split("/").filter((p) => p.length > 0);
+  const normalizedParts: string[] = [];
+
+  for (const part of parts) {
+    if (part === ".") continue;
+    if (part === "..") {
+      normalizedParts.pop();
+      continue;
+    }
+    normalizedParts.push(part);
+  }
+  if (normalizedParts.length === 0) return "/";
+
+  const normalized = "/" + normalizedParts.join("/");
+  return normalized;
 }
 
 /**
@@ -824,9 +845,9 @@ export function useMemoryFS(
 
         const path = abi.readString(view, pathPtr, pathLen);
 
-        const guestPath =
-          (dirEntry.path.endsWith("/") ? dirEntry.path : dirEntry.path + "/") +
-          path;
+        const guestPath = normalizePath(
+          (dirEntry.path.endsWith("/") ? dirEntry.path : dirEntry.path + "/") + path,
+        );
 
         const existing = getFileFromPath(guestPath);
         if (existing) {
@@ -860,6 +881,51 @@ export function useMemoryFS(
 
         view.setUint32(opened_fd, nextFd, true);
         nextFd++;
+        return WASIAbi.WASI_ESUCCESS;
+      },
+
+      path_create_directory: (fd: number, pathPtr: number, pathLen: number) => {
+        const view = memoryView();
+        const guestRelPath = abi.readString(view, pathPtr, pathLen);
+        const dirEntry = getFileFromFD(fd);
+        if (!dirEntry || dirEntry.node.type !== "dir")
+          return WASIAbi.WASI_ERRNO_NOTDIR;
+
+        const fullGuestPath =
+          (dirEntry.path.endsWith("/") ? dirEntry.path : dirEntry.path + "/") +
+          guestRelPath;
+
+        fileSystem.ensureDir(fullGuestPath);
+        return WASIAbi.WASI_ESUCCESS;
+      },
+
+      path_unlink_file: (fd: number, pathPtr: number, pathLen: number) => {
+        const view = memoryView();
+        const guestRelPath = abi.readString(view, pathPtr, pathLen);
+        const dirEntry = getFileFromFD(fd);
+        if (!dirEntry || dirEntry.node.type !== "dir")
+          return WASIAbi.WASI_ERRNO_NOTDIR;
+
+        const fullGuestPath =
+          (dirEntry.path.endsWith("/") ? dirEntry.path : dirEntry.path + "/") +
+          guestRelPath;
+
+        fileSystem.removeEntry(fullGuestPath);
+        return WASIAbi.WASI_ESUCCESS;
+      },
+
+      path_remove_directory: (fd: number, pathPtr: number, pathLen: number) => {
+        const view = memoryView();
+        const guestRelPath = abi.readString(view, pathPtr, pathLen);
+        const dirEntry = getFileFromFD(fd);
+        if (!dirEntry || dirEntry.node.type !== "dir")
+          return WASIAbi.WASI_ERRNO_NOTDIR;
+
+        const fullGuestPath =
+          (dirEntry.path.endsWith("/") ? dirEntry.path : dirEntry.path + "/") +
+          guestRelPath;
+
+        fileSystem.removeEntry(fullGuestPath);
         return WASIAbi.WASI_ESUCCESS;
       },
 
