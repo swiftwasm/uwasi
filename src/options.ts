@@ -1,4 +1,4 @@
-import { WASIAbi } from "./abi";
+import { WASIAbi } from "./abi.js";
 
 export type WASIFeatureProvider = (
   options: WASIOptions,

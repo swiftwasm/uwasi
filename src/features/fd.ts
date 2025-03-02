@@ -1,5 +1,5 @@
-import { WASIAbi } from "../abi";
-import { WASIFeatureProvider, WASIOptions } from "../options";
+import { WASIAbi } from "../abi.js";
+import { WASIFeatureProvider, WASIOptions } from "../options.js";
 
 interface FdEntry {
   writev(iovs: Uint8Array[]): number;

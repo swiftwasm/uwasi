@@ -1,11 +1,11 @@
-import { WASIAbi } from "../abi";
-import { WASIFeatureProvider, WASIOptions } from "../options";
-import { useArgs } from "./args";
-import { useClock } from "./clock";
-import { useEnviron } from "./environ";
-import { useMemoryFS } from "./fd";
-import { useProc } from "./proc";
-import { useRandom } from "./random";
+import { WASIAbi } from "../abi.js";
+import { WASIFeatureProvider, WASIOptions } from "../options.js";
+import { useArgs } from "./args.js";
+import { useClock } from "./clock.js";
+import { useEnviron } from "./environ.js";
+import { useMemoryFS } from "./fd.js";
+import { useProc } from "./proc.js";
+import { useRandom } from "./random.js";
 
 type Options = Parameters<typeof useMemoryFS>[0] & Parameters<typeof useRandom>[0];
 
