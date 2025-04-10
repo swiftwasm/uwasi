@@ -35,12 +35,6 @@ export class WASI {
         const featureName = useFeature.name || "Unknown feature";
         const imports = useFeature(options, abi, this.view.bind(this));
         for (const key in imports) {
-          if (key in this.wasiImport) {
-            const previousProvider = importProviders[key] || "Unknown feature";
-            throw new Error(
-              `Import conflict: Function '${key}' is already provided by '${previousProvider}' and is being redefined by '${featureName}'`,
-            );
-          }
           importProviders[key] = featureName;
         }
         this.wasiImport = { ...this.wasiImport, ...imports };

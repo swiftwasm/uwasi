@@ -2,9 +2,10 @@
 import fs from "fs/promises";
 import fsSync from "fs";
 import path from "path";
-import { useAll, WASI, MemoryFileSystem } from "../lib/esm/index.js";
+import { useAll, WASI, MemoryFileSystem, useRandom } from "../lib/esm/index.js";
 import { describe, it } from "node:test";
 import assert from "node:assert";
+import * as crypto from "crypto";
 
 /**
  * @typedef {{ exit_code?: number, args?: string[], env?: Record<string, string>, dirs?: string[] }} TestCaseConfig
@@ -124,6 +125,9 @@ async function runTest(testCase) {
             }
           },
         },
+      }),
+      useRandom({
+        randomFillSync: crypto.randomFillSync,
       }),
     ],
   });
