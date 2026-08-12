@@ -31,7 +31,7 @@
     "access": "public"
   },
   "author": "SwiftWasm Team",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "devDependencies": {
     "@types/node": "^17.0.31",
     "prettier": "^3.5.2",
