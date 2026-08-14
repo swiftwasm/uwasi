@@ -187,3 +187,35 @@ Some of WASI system calls are not implemented yet. Contributions are welcome!
 | `random_get` | ✅ | |
 | `sched_yield` | ✅ | No-op success on a single-threaded host |
 | `sock_XXX` | ❌ | |
+
+## Spec conformance notes
+
+uwasi targets WASI preview1. Four behaviors deliberately go beyond or beside
+the letter of the preview1 spec; all are defaults chosen for compatibility on
+single-threaded JavaScript hosts, and all guest-visible surface remains the
+plain `wasi_snapshot_preview1` namespace:
+
+- **CPU-time clocks (`clockid` 2/3) are answered with the monotonic clock.**
+  Preview2 dropped these clocks as impractical to implement, and
+  [wasi-clocks](https://github.com/WebAssembly/wasi-clocks) documents
+  wasi-libc's strategy of emulating them with the monotonic clock — uwasi
+  applies the same sanctioned emulation at the host. (wasmtime instead
+  rejects these clock IDs.)
+- **Without a readiness provider, `poll_oneoff` fd subscriptions report
+  ready immediately** with nominal `nbytes` (1 for reads, 65536 for writes)
+  rather than actual availability. Wire `usePoll({ fdReadiness })` (e.g. via
+  `SharedInputChannel`) for genuine readiness. Preview2 removed byte counts
+  from poll results entirely; preview3 removed readiness polling.
+- **`poll_oneoff` returns `ENOTSUP` for waits that can never complete**
+  (not-ready fds with no way to wait and no clock deadline) instead of
+  blocking forever on the only thread. Preview1 does not define this failure
+  mode; preview3's completion-based async dissolves the problem.
+- **`proc_raise` terminates with exit code `128 + signal` for every
+  signal.** There is no signal machinery to deliver to; modern wasi-libc no
+  longer calls `proc_raise`, and preview2/preview3 removed signals.
+
+Host-side APIs beyond the preview1 surface (`usePoll`'s `sleep`/
+`fdReadiness` options, `SharedInputChannel`) are embedder configuration,
+invisible to guests. They intentionally mirror preview2 shapes — a
+`WASIFdReadiness` is a `pollable`, a `SharedInputChannel` is an
+`input-stream` producer — so a future preview2 host layer can reuse them.
