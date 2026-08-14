@@ -161,3 +161,18 @@ describe("SharedInputChannel", () => {
     );
   });
 });
+
+describe("SharedInputChannel validation and stdin handler", () => {
+  it("rejects a foreign buffer with a non-power-of-two data region", () => {
+    const bad = new SharedArrayBuffer(16 + 100); // header + 100 bytes
+    assert.throws(() => new SharedInputChannel(bad), /power-of-two/);
+  });
+
+  it("stdin() drains buffered bytes and then reports empty", () => {
+    const channel = new SharedInputChannel(64);
+    const stdin = channel.stdin();
+    channel.push(new TextEncoder().encode("hello"));
+    assert.deepStrictEqual(stdin(), new TextEncoder().encode("hello"));
+    assert.strictEqual(stdin().length, 0);
+  });
+});

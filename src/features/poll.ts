@@ -208,10 +208,15 @@ export function usePoll(
           const events: WASIEvent[] = [];
           for (const subscription of fdSubscriptions) {
             const isRead = subscription.type === "fd_read";
-            const probe = isRead ? fdReadiness?.read : fdReadiness?.write;
+            // Invoke probes as methods so providers may rely on `this`.
             // No provider, or null from the provider, means the default
             // always-ready treatment for this fd.
-            const state = (probe ? probe(subscription.fd) : null) || {
+            const probed = !fdReadiness
+              ? null
+              : isRead
+                ? fdReadiness.read?.(subscription.fd)
+                : fdReadiness.write?.(subscription.fd);
+            const state = probed || {
               ready: true,
               nbytes: isRead ? 1 : 65536,
             };

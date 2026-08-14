@@ -248,3 +248,123 @@ describe("poll.usePoll with fdReadiness", () => {
     assert.strictEqual(view.getUint16(1024 + 24, true), 1); // hangup flag
   });
 });
+
+describe("poll.usePoll edge cases", () => {
+  it("unknown subscription tag returns EINVAL", () => {
+    const { view, imports } = makeImports();
+    view.setBigUint64(0, BigInt(1), true);
+    view.setUint8(8, 7); // not a valid eventtype
+    assert.strictEqual(imports.poll_oneoff(0, 1024, 1, 2048), 28);
+  });
+
+  it("clock subscription with an unsupported clock ID reports ENOSYS in the event", () => {
+    const { view, imports } = makeImports();
+    writeClockSubscription(view, 0, {
+      userdata: 5,
+      clockId: 99,
+      timeoutNs: 1_000_000,
+    });
+    assert.strictEqual(imports.poll_oneoff(0, 1024, 1, 2048), 0);
+    assert.strictEqual(view.getUint32(2048, true), 1);
+    const event = readEvent(view, 1024);
+    assert.strictEqual(event.userdata, BigInt(5));
+    assert.strictEqual(event.error, 52); // ENOSYS
+    assert.strictEqual(event.type, EVENTTYPE_CLOCK);
+  });
+
+  it("absolute monotonic deadline in the future sleeps until it", () => {
+    const { view, imports } = makeImports();
+    // Read the current monotonic value the same way the implementation does.
+    const nowNs =
+      BigInt(Math.trunc(performance.now())) * BigInt(1_000_000) +
+      BigInt(Math.round((performance.now() % 1) * 1_000_000));
+    writeClockSubscription(view, 0, {
+      userdata: 8,
+      clockId: CLOCK_MONOTONIC,
+      timeoutNs: nowNs + BigInt(40_000_000), // +40ms absolute
+      flags: SUBCLOCKFLAGS_ABSTIME,
+    });
+    const before = performance.now();
+    assert.strictEqual(imports.poll_oneoff(0, 1024, 1, 2048), 0);
+    const elapsed = performance.now() - before;
+    assert.strictEqual(view.getUint32(2048, true), 1);
+    assert.ok(
+      elapsed >= 30 && elapsed < 500,
+      `expected ~40ms sleep, took ${elapsed}ms`,
+    );
+  });
+
+  it("write-side readiness probe gates fd_write subscriptions", () => {
+    const { view, imports } = makeImports({
+      fdReadiness: {
+        write: (fd) => (fd === 1 ? { ready: false } : null),
+      },
+    });
+    writeClockSubscription(view, 0, {
+      userdata: 1,
+      clockId: CLOCK_MONOTONIC,
+      timeoutNs: 30_000_000,
+    });
+    writeFdSubscription(view, SUBSCRIPTION_SIZE, {
+      userdata: 2,
+      eventType: EVENTTYPE_FD_WRITE,
+      fd: 1,
+    });
+    assert.strictEqual(imports.poll_oneoff(0, 1024, 2, 2048), 0);
+    assert.strictEqual(view.getUint32(2048, true), 1);
+    assert.strictEqual(readEvent(view, 1024).userdata, BigInt(1)); // clock won
+  });
+
+  it("write-side readiness probe reports nbytes when ready", () => {
+    const { view, imports } = makeImports({
+      fdReadiness: {
+        write: (fd) => (fd === 1 ? { ready: true, nbytes: 123 } : null),
+      },
+    });
+    writeFdSubscription(view, 0, {
+      userdata: 2,
+      eventType: EVENTTYPE_FD_WRITE,
+      fd: 1,
+    });
+    assert.strictEqual(imports.poll_oneoff(0, 1024, 1, 2048), 0);
+    assert.strictEqual(view.getBigUint64(1024 + 16, true), BigInt(123));
+  });
+
+  it("a null from the provider falls back to always-ready for that fd", () => {
+    const { view, imports } = makeImports({
+      fdReadiness: {
+        read: (fd) => (fd === 0 ? { ready: false } : null),
+        wait: () => {},
+      },
+    });
+    // fd 5 is not covered by the provider, so it is immediately ready.
+    writeFdSubscription(view, 0, {
+      userdata: 9,
+      eventType: EVENTTYPE_FD_READ,
+      fd: 5,
+    });
+    assert.strictEqual(imports.poll_oneoff(0, 1024, 1, 2048), 0);
+    assert.strictEqual(view.getUint32(2048, true), 1);
+    assert.strictEqual(readEvent(view, 1024).userdata, BigInt(9));
+  });
+
+  it("readiness probes keep their receiver (`this`)", () => {
+    class Provider {
+      constructor() {
+        this.state = { ready: true, nbytes: 7 };
+      }
+      read(fd) {
+        // Throws if `this` was stripped by the caller.
+        return fd === 0 ? this.state : null;
+      }
+    }
+    const { view, imports } = makeImports({ fdReadiness: new Provider() });
+    writeFdSubscription(view, 0, {
+      userdata: 1,
+      eventType: EVENTTYPE_FD_READ,
+      fd: 0,
+    });
+    assert.strictEqual(imports.poll_oneoff(0, 1024, 1, 2048), 0);
+    assert.strictEqual(view.getBigUint64(1024 + 16, true), BigInt(7));
+  });
+});
