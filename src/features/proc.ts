@@ -14,8 +14,10 @@ export function useProc(
       throw new WASIProcExit(code);
     },
     proc_raise: (signal: number) => {
-      // TODO: Implement
-      return WASIAbi.WASI_ESUCCESS;
+      // There is no signal handling machinery on this host; treat every
+      // raised signal as fatal rather than silently continuing. The exit
+      // code follows the POSIX shell convention of 128 + signal number.
+      throw new WASIProcExit(128 + signal);
     },
   };
 }
