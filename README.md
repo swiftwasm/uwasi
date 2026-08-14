@@ -177,20 +177,57 @@ worker threads need no special setup.
 
 ## Implementation Status
 
-Some of WASI system calls are not implemented yet. Contributions are welcome!
+43 of the 46 WASI preview1 functions are implemented (the three
+socket-transfer calls are deliberately absent — preview1 sockets are
+vestigial and were replaced wholesale in preview2). The filesystem surface
+is provided by `useMemoryFS` and validated against the full
+[wasi-testsuite](https://github.com/WebAssembly/wasi-testsuite) with zero
+skipped cases; `useStdio` provides the stdio subset only.
 
 | Syscall | Status | Notes |
 |-------|----------|---------|
-| `args_XXX` | ✅ | |
-| `clock_XXX` | ✅ | CPU-time clocks are approximated by the monotonic clock |
-| `environ_XXX` | ✅ | |
-| `fd_XXX` | 🚧 | stdin/stdout/stderr are supported |
-| `path_XXX` | ❌ | |
+| `args_get` / `args_sizes_get` | ✅ | |
+| `clock_res_get` / `clock_time_get` | ✅ | CPU-time clocks are approximated by the monotonic clock |
+| `environ_get` / `environ_sizes_get` | ✅ | |
+| `fd_advise` | ✅ | Validates the advice; otherwise a no-op |
+| `fd_allocate` | ✅ | Grows the file to `offset + len`, never shrinks |
+| `fd_close` | ✅ | Preopens are closable |
+| `fd_datasync` / `fd_sync` | ✅ | No-op success (memory is always "synced") |
+| `fd_fdstat_get` | ✅ | Reports real per-fd flags and rights |
+| `fd_fdstat_set_flags` | ✅ | `APPEND` honored by `fd_write` |
+| `fd_fdstat_set_rights` | ✅ | Rights may only shrink (`NOTCAPABLE` otherwise) |
+| `fd_filestat_get` | ✅ | Stable per-node inodes, real sizes and timestamps |
+| `fd_filestat_set_size` | ✅ | Zero-fills growth |
+| `fd_filestat_set_times` | ✅ | Validates `fstflags` combinations |
+| `fd_pread` / `fd_pwrite` | ✅ | Positional; never move the cursor; `pwrite` ignores `APPEND` |
+| `fd_prestat_get` / `fd_prestat_dir_name` | ✅ | |
+| `fd_read` / `fd_write` | ✅ | Rights-checked; `APPEND` writes at end of file |
+| `fd_readdir` | ✅ | Cookie-paged with `.`/`..` entries and real inodes |
+| `fd_renumber` | ✅ | Destination must be open; source is closed |
+| `fd_seek` / `fd_tell` | ✅ | `ISDIR` on directories, `SPIPE` on character devices, `INVAL` on negative seek |
+| `path_create_directory` | ✅ | Single level; parent must exist |
+| `path_filestat_get` | ✅ | `SYMLINK_FOLLOW` honored |
+| `path_filestat_set_times` | ✅ | Symlink-aware (lstat-level timestamps) |
+| `path_link` | ✅ | Hard links with shared inode and `nlink` accounting |
+| `path_open` | ✅ | Full `oflags`/`fdflags`/rights semantics; sandboxed path resolution |
+| `path_readlink` | ✅ | Silent truncation to the buffer, no NUL |
+| `path_remove_directory` | ✅ | `NOTEMPTY` on non-empty directories |
+| `path_rename` | ✅ | POSIX replace semantics incl. empty-directory targets |
+| `path_symlink` | ✅ | Relative targets only; dangling links allowed |
+| `path_unlink_file` | ✅ | Removes symlinks without following |
 | `poll_oneoff` | ✅ | Clock subscriptions block the thread (`Atomics.wait`, busy-wait fallback); fd subscriptions report ready immediately by default, or genuine readiness via `SharedInputChannel`/`fdReadiness` |
-| `proc_XXX` | ✅ | `proc_raise` exits with `128 + signal` |
+| `proc_exit` | ✅ | |
+| `proc_raise` | ✅ | Exits with `128 + signal` |
 | `random_get` | ✅ | |
 | `sched_yield` | ✅ | No-op success on a single-threaded host |
-| `sock_XXX` | ❌ | |
+| `sock_shutdown` | ✅ | Error reporting only (`BADF` / `NOTSOCK`) |
+| `sock_accept` / `sock_recv` / `sock_send` | ❌ | Deliberately absent; superseded by preview2 `wasi:sockets` |
+
+Path resolution is sandboxed per directory fd: `.`/`..`/`//` normalize,
+`..` cannot escape the fd, absolute paths and absolute symlink targets are
+rejected (`PERM`), intermediate symlinks always expand, and the final
+symlink expands only with `LOOKUPFLAGS_SYMLINK_FOLLOW` (loop budget 32,
+then `LOOP`).
 
 ## Spec conformance notes
 
