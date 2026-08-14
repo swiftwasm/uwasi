@@ -37,7 +37,9 @@ export function useClock(
       switch (clockId) {
         // CPU-time clocks are approximated with the monotonic clock: JS
         // hosts expose no CPU-time source, and on a single-threaded host
-        // uptime is the closest observable value.
+        // uptime is the closest observable value. This mirrors wasi-libc's
+        // own compatibility strategy after preview2 dropped these clocks
+        // (https://github.com/WebAssembly/wasi-clocks).
         case WASIAbi.WASI_CLOCK_MONOTONIC:
         case WASIAbi.WASI_CLOCK_PROCESS_CPUTIME_ID:
         case WASIAbi.WASI_CLOCK_THREAD_CPUTIME_ID: {
