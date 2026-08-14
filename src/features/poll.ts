@@ -63,13 +63,45 @@ type ClockWait = {
 };
 
 /**
+ * Snapshot of a file descriptor's readiness, reported without consuming or
+ * producing any data.
+ */
+export interface WASIFdReadinessState {
+  ready: boolean;
+  /** Bytes readable (fd_read) or writable (fd_write) right now. */
+  nbytes?: number;
+  /** Peer closed / end of file; delivered as the event's hangup flag. */
+  hangup?: boolean;
+}
+
+/**
+ * Host-side readiness source for `poll_oneoff` fd subscriptions.
+ *
+ * `read`/`write` return the fd's current state without blocking, or `null`
+ * to fall back to the default always-ready treatment for that fd. `wait`
+ * parks the calling thread until fd state may have changed or the timeout
+ * elapses (`null` means wait indefinitely); `poll_oneoff` re-checks
+ * readiness after every wakeup, so spurious wakeups are harmless.
+ */
+export interface WASIFdReadiness {
+  read?(fd: number): WASIFdReadinessState | null;
+  write?(fd: number): WASIFdReadinessState | null;
+  wait?(timeoutMilliseconds: number | null): void;
+}
+
+/**
  * A feature provider that provides `poll_oneoff` and `sched_yield`.
  *
- * Since this runtime is single-threaded and all of its file descriptors are
- * backed by synchronous, non-blocking host calls, `fd_read`/`fd_write`
- * subscriptions are considered immediately ready. Clock subscriptions block
- * the calling thread until the earliest deadline, which is what libc builds
- * on for `nanosleep`, `usleep`, `sem_timedwait`, and friends.
+ * Clock subscriptions block the calling thread until the earliest deadline,
+ * which is what libc builds on for `nanosleep`, `usleep`, `sem_timedwait`,
+ * and friends.
+ *
+ * Since this runtime is single-threaded and its file descriptors are backed
+ * by synchronous host calls, `fd_read`/`fd_write` subscriptions are
+ * considered immediately ready by default. Pass `fdReadiness` (for example
+ * from {@link SharedInputChannel}) to report genuine readiness instead: the
+ * calling thread then parks until data arrives, end of file, or the earliest
+ * clock deadline, whichever comes first.
  *
  * ```js
  * const wasi = new WASI({
@@ -77,12 +109,16 @@ type ClockWait = {
  * });
  * ```
  *
- * The blocking strategy can be replaced, e.g. to integrate with a host
- * scheduler or to forbid blocking entirely:
+ * With genuine stdin readiness fed from another thread:
  *
  * ```js
+ * const channel = new SharedInputChannel();
+ * // hand channel.sharedBuffer to the producing thread...
  * const wasi = new WASI({
- *   features: [usePoll({ sleep: (ms) => mySynchronousSleep(ms) })],
+ *   features: [
+ *     useStdio({ stdin: channel.stdin() }),
+ *     usePoll({ fdReadiness: channel.fdReadiness() }),
+ *   ],
  * });
  * ```
  */
@@ -94,6 +130,11 @@ export function usePoll(
      * busy-wait otherwise.
      */
     sleep?: (milliseconds: number) => void;
+    /**
+     * Genuine fd readiness for `poll_oneoff` subscriptions. Without it,
+     * every fd subscription reports ready immediately.
+     */
+    fdReadiness?: WASIFdReadiness;
   } = {},
 ): WASIFeatureProvider {
   return (
@@ -102,6 +143,7 @@ export function usePoll(
     memoryView: () => DataView,
   ): WebAssembly.ModuleImports => {
     const sleep = useOptions.sleep || defaultSleep;
+    const fdReadiness = useOptions.fdReadiness;
     return {
       sched_yield: () => {
         // There is no other thread to yield to.
@@ -121,31 +163,22 @@ export function usePoll(
           nsubscriptions,
         );
 
-        const events: WASIEvent[] = [];
+        const staticEvents: WASIEvent[] = [];
+        const fdSubscriptions: (WASISubscription & {
+          type: "fd_read" | "fd_write";
+        })[] = [];
         const clockWaits: ClockWait[] = [];
 
         for (const subscription of subscriptions) {
           switch (subscription.type) {
             case "fd_read":
-              events.push({
-                userdata: subscription.userdata,
-                error: WASIAbi.WASI_ESUCCESS,
-                type: WASIAbi.WASI_EVENTTYPE_FD_READ,
-                nbytes: BigInt(1),
-              });
-              break;
             case "fd_write":
-              events.push({
-                userdata: subscription.userdata,
-                error: WASIAbi.WASI_ESUCCESS,
-                type: WASIAbi.WASI_EVENTTYPE_FD_WRITE,
-                nbytes: BigInt(65536),
-              });
+              fdSubscriptions.push(subscription);
               break;
             case "clock": {
               const now = clockNowNs(subscription.clockId);
               if (now === null) {
-                events.push({
+                staticEvents.push({
                   userdata: subscription.userdata,
                   error: WASIAbi.WASI_ENOSYS,
                   type: WASIAbi.WASI_EVENTTYPE_CLOCK,
@@ -171,7 +204,33 @@ export function usePoll(
           }
         }
 
-        const expireElapsedClocks = () => {
+        const readyFdEvents = (): WASIEvent[] => {
+          const events: WASIEvent[] = [];
+          for (const subscription of fdSubscriptions) {
+            const isRead = subscription.type === "fd_read";
+            const probe = isRead ? fdReadiness?.read : fdReadiness?.write;
+            // No provider, or null from the provider, means the default
+            // always-ready treatment for this fd.
+            const state = (probe ? probe(subscription.fd) : null) || {
+              ready: true,
+              nbytes: isRead ? 1 : 65536,
+            };
+            if (!state.ready) continue;
+            events.push({
+              userdata: subscription.userdata,
+              error: WASIAbi.WASI_ESUCCESS,
+              type: isRead
+                ? WASIAbi.WASI_EVENTTYPE_FD_READ
+                : WASIAbi.WASI_EVENTTYPE_FD_WRITE,
+              nbytes: BigInt(state.nbytes ?? (isRead ? 1 : 65536)),
+              hangup: state.hangup,
+            });
+          }
+          return events;
+        };
+
+        const expiredClockEvents = (): WASIEvent[] => {
+          const events: WASIEvent[] = [];
           for (let i = clockWaits.length - 1; i >= 0; i--) {
             if (clockWaits[i].remainingNs() <= BigInt(0)) {
               events.push({
@@ -182,21 +241,39 @@ export function usePoll(
               clockWaits.splice(i, 1);
             }
           }
+          return events;
         };
 
-        expireElapsedClocks();
+        let events = [
+          ...staticEvents,
+          ...readyFdEvents(),
+          ...expiredClockEvents(),
+        ];
 
-        // Only block when nothing is ready yet. Every wait here has a
-        // deadline; an indefinite wait cannot be expressed with clock
-        // subscriptions, so this loop always terminates.
-        while (events.length === 0 && clockWaits.length > 0) {
-          let earliestNs = clockWaits[0].remainingNs();
-          for (const wait of clockWaits) {
-            const remaining = wait.remainingNs();
-            if (remaining < earliestNs) earliestNs = remaining;
+        // Only block when nothing is ready yet. Each iteration parks until
+        // the earliest clock deadline or, when a readiness provider is
+        // present, until it reports fd state may have changed.
+        while (events.length === 0) {
+          let timeoutMs: number | null = null;
+          if (clockWaits.length > 0) {
+            let earliestNs = clockWaits[0].remainingNs();
+            for (const wait of clockWaits) {
+              const remaining = wait.remainingNs();
+              if (remaining < earliestNs) earliestNs = remaining;
+            }
+            timeoutMs = Math.ceil(nsToMs(earliestNs));
           }
-          sleep(Math.ceil(nsToMs(earliestNs)));
-          expireElapsedClocks();
+          if (fdSubscriptions.length > 0 && fdReadiness?.wait) {
+            fdReadiness.wait(timeoutMs);
+          } else if (timeoutMs !== null) {
+            sleep(timeoutMs);
+          } else {
+            // Not-ready fd subscriptions, no way to wait for them, and no
+            // clock deadline: this wait can never be satisfied. Fail loudly
+            // rather than hanging or spinning.
+            return WASIAbi.WASI_ERRNO_NOTSUP;
+          }
+          events = [...readyFdEvents(), ...expiredClockEvents()];
         }
 
         for (let i = 0; i < events.length; i++) {
