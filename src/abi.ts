@@ -89,6 +89,10 @@ export class WASIAbi {
   static readonly WASI_SUBCLOCKFLAGS_ABSTIME = 1;
 
   /**
+   * Permission denied.
+   */
+  static readonly WASI_ERRNO_ACCES = 2;
+  /**
    * The file descriptor or file refers to a directory.
    */
   static readonly WASI_ERRNO_ISDIR = 31;
@@ -97,9 +101,25 @@ export class WASIAbi {
    */
   static readonly WASI_ERRNO_INVAL = 28;
   /**
+   * Too many levels of symbolic links.
+   */
+  static readonly WASI_ERRNO_LOOP = 32;
+  /**
+   * Too many links.
+   */
+  static readonly WASI_ERRNO_MLINK = 34;
+  /**
+   * Filename too long.
+   */
+  static readonly WASI_ERRNO_NAMETOOLONG = 37;
+  /**
    * Not a directory or a symbolic link to a directory.
    */
   static readonly WASI_ERRNO_NOTDIR = 54;
+  /**
+   * Directory not empty.
+   */
+  static readonly WASI_ERRNO_NOTEMPTY = 55;
   /**
    * No such file or directory.
    */
@@ -112,6 +132,45 @@ export class WASIAbi {
    * I/O error.
    */
   static readonly WASI_ERRNO_IO = 29;
+  /**
+   * Operation not permitted.
+   */
+  static readonly WASI_ERRNO_PERM = 63;
+  /**
+   * Not a socket.
+   */
+  static readonly WASI_ERRNO_NOTSOCK = 57;
+  /**
+   * Invalid seek (unseekable device).
+   */
+  static readonly WASI_ERRNO_SPIPE = 70;
+  /**
+   * Extension: capability insufficient.
+   */
+  static readonly WASI_ERRNO_NOTCAPABLE = 76;
+
+  /**
+   * Append mode: data written to the file is always appended to the end.
+   */
+  static readonly WASI_FDFLAGS_APPEND = 1 << 0;
+  static readonly WASI_FDFLAGS_DSYNC = 1 << 1;
+  static readonly WASI_FDFLAGS_NONBLOCK = 1 << 2;
+  static readonly WASI_FDFLAGS_RSYNC = 1 << 3;
+  static readonly WASI_FDFLAGS_SYNC = 1 << 4;
+
+  static readonly WASI_FSTFLAGS_ATIM = 1 << 0;
+  static readonly WASI_FSTFLAGS_ATIM_NOW = 1 << 1;
+  static readonly WASI_FSTFLAGS_MTIM = 1 << 2;
+  static readonly WASI_FSTFLAGS_MTIM_NOW = 1 << 3;
+
+  /**
+   * `path_*` lookup flag: expand the final symlink component.
+   */
+  static readonly WASI_LOOKUPFLAGS_SYMLINK_FOLLOW = 1 << 0;
+
+  static readonly WASI_WHENCE_SET = 0;
+  static readonly WASI_WHENCE_CUR = 1;
+  static readonly WASI_WHENCE_END = 2;
 
   /**
    * The file descriptor or file refers to a character device inode.
@@ -125,6 +184,10 @@ export class WASIAbi {
    * The file descriptor or file refers to a regular file inode.
    */
   static readonly WASI_FILETYPE_REGULAR_FILE = 4;
+  /**
+   * The file refers to a symbolic link inode.
+   */
+  static readonly WASI_FILETYPE_SYMBOLIC_LINK = 7;
   /**
    * Create file if it does not exist.
    */
@@ -341,14 +404,54 @@ export class WASIAbi {
     );
   }
 
-  writeFilestat(memory: DataView, ptr: number, filetype: number): void {
-    memory.setBigUint64(ptr, /* dev */ BigInt(0), true);
-    memory.setBigUint64(ptr + 8, /* ino */ BigInt(0), true);
+  writeFilestat(
+    memory: DataView,
+    ptr: number,
+    filetype: number,
+    stat: {
+      dev?: bigint;
+      ino?: bigint;
+      nlink?: bigint;
+      size?: bigint;
+      atim?: bigint;
+      mtim?: bigint;
+      ctim?: bigint;
+    } = {},
+  ): void {
+    memory.setBigUint64(ptr, stat.dev ?? BigInt(0), true);
+    memory.setBigUint64(ptr + 8, stat.ino ?? BigInt(0), true);
     memory.setUint8(ptr + 16, filetype);
-    memory.setUint32(ptr + 24, /* nlink */ 0, true);
-    memory.setBigUint64(ptr + 32, /* size */ BigInt(0), true);
-    memory.setBigUint64(ptr + 40, /* atim */ BigInt(0), true);
-    memory.setBigUint64(ptr + 48, /* mtim */ BigInt(0), true);
+    memory.setBigUint64(ptr + 24, stat.nlink ?? BigInt(1), true);
+    memory.setBigUint64(ptr + 32, stat.size ?? BigInt(0), true);
+    memory.setBigUint64(ptr + 40, stat.atim ?? BigInt(0), true);
+    memory.setBigUint64(ptr + 48, stat.mtim ?? BigInt(0), true);
+    memory.setBigUint64(ptr + 56, stat.ctim ?? BigInt(0), true);
+  }
+
+  /**
+   * Serialize one `dirent` followed by its name into `ptr`, truncating at
+   * `bufferEnd`. Returns the number of bytes written (possibly partial, per
+   * `fd_readdir` semantics).
+   */
+  writeDirent(
+    memory: DataView,
+    ptr: number,
+    bufferEnd: number,
+    entry: { nextCookie: bigint; ino: bigint; name: string; type: number },
+  ): number {
+    const nameBytes = this.encoder.encode(entry.name);
+    const record = new Uint8Array(24 + nameBytes.length);
+    const view = new DataView(record.buffer);
+    view.setBigUint64(0, entry.nextCookie, true);
+    view.setBigUint64(8, entry.ino, true);
+    view.setUint32(16, nameBytes.length, true);
+    view.setUint8(20, entry.type);
+    record.set(nameBytes, 24);
+    const writable = Math.min(record.length, bufferEnd - ptr);
+    new Uint8Array(memory.buffer, ptr, writable).set(
+      record.subarray(0, writable),
+    );
+    return writable;
   }
 
   writeFdstat(
