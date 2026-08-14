@@ -169,7 +169,11 @@ producer.close(); // end of file
 ```
 
 `Atomics.wait` is unavailable on a browser main thread, so run the guest in a
-worker there; waits degrade to a busy-wait otherwise.
+worker there; waits degrade to a busy-wait otherwise. In browsers,
+`SharedArrayBuffer` additionally requires the page to be cross-origin
+isolated (`Cross-Origin-Opener-Policy: same-origin` and
+`Cross-Origin-Embedder-Policy: require-corp` response headers). Node.js and
+worker threads need no special setup.
 
 ## Implementation Status
 
