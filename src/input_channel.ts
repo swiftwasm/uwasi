@@ -70,6 +70,14 @@ export class SharedInputChannel {
     this.header = new Int32Array(this.sharedBuffer, 0, 4);
     this.data = new Uint8Array(this.sharedBuffer, HEADER_BYTES);
     this.capacity = this.data.length;
+    // Ring offsets are computed with a bitmask, which is only correct for
+    // power-of-two capacities. A channel created by this class always
+    // satisfies this; reject foreign buffers that do not.
+    if (this.capacity < 1 || (this.capacity & (this.capacity - 1)) !== 0) {
+      throw new Error(
+        `SharedInputChannel buffer must hold a power-of-two data region, got ${this.capacity} bytes`,
+      );
+    }
   }
 
   /** Bytes currently buffered and readable. */
