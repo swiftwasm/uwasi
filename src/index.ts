@@ -14,6 +14,7 @@ export {
 } from "./features/fd.js";
 export * from "./features/poll.js";
 export * from "./features/proc.js";
+export { SharedInputChannel } from "./input_channel.js";
 export * from "./features/random.js";
 export * from "./features/tracing.js";
 

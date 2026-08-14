@@ -140,6 +140,37 @@ const wasi = new WASI({
 
 `usePoll` is included in `useAll()`.
 
+### Genuine stdin readiness with `SharedInputChannel`
+
+For readiness-driven guests (e.g. `poll(2)`-based event loops or libdispatch
+fd sources), `SharedInputChannel` connects a producing thread — a worker
+pumping a pipe, or a UI thread collecting keystrokes — to the guest thread
+over a `SharedArrayBuffer` ring. `poll_oneoff` then genuinely parks the guest
+(`Atomics.wait`) until input arrives, end of file, or a clock deadline, and
+reads drain the buffer without blocking. Producer close is delivered as an
+fd hangup event (`POLLHUP` through libc `poll`).
+
+```js
+// Guest thread
+import { WASI, useStdio, usePoll, SharedInputChannel } from "uwasi";
+const channel = new SharedInputChannel();
+// hand channel.sharedBuffer to the producing thread...
+const wasi = new WASI({
+    features: [
+        useStdio({ stdin: channel.stdin() }),
+        usePoll({ fdReadiness: channel.fdReadiness() }),
+    ],
+});
+
+// Producing thread (worker or main thread)
+const producer = new SharedInputChannel(sharedBufferFromGuestThread);
+producer.push(new TextEncoder().encode("hello"));
+producer.close(); // end of file
+```
+
+`Atomics.wait` is unavailable on a browser main thread, so run the guest in a
+worker there; waits degrade to a busy-wait otherwise.
+
 ## Implementation Status
 
 Some of WASI system calls are not implemented yet. Contributions are welcome!
@@ -151,7 +182,7 @@ Some of WASI system calls are not implemented yet. Contributions are welcome!
 | `environ_XXX` | ✅ | |
 | `fd_XXX` | 🚧 | stdin/stdout/stderr are supported |
 | `path_XXX` | ❌ | |
-| `poll_oneoff` | ✅ | Clock subscriptions block the thread (`Atomics.wait`, busy-wait fallback); fd subscriptions report ready immediately |
+| `poll_oneoff` | ✅ | Clock subscriptions block the thread (`Atomics.wait`, busy-wait fallback); fd subscriptions report ready immediately by default, or genuine readiness via `SharedInputChannel`/`fdReadiness` |
 | `proc_XXX` | ✅ | `proc_raise` exits with `128 + signal` |
 | `random_get` | ✅ | |
 | `sched_yield` | ✅ | No-op success on a single-threaded host |

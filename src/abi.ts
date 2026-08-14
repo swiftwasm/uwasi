@@ -26,6 +26,8 @@ export interface WASIEvent {
   error: number;
   type: number;
   nbytes?: bigint;
+  /** Peer closed / end of file on this fd (`eventrwflags::fd_readwrite_hangup`). */
+  hangup?: boolean;
 }
 
 export class WASIAbi {
@@ -43,6 +45,11 @@ export class WASIAbi {
    * Function not supported.
    */
   static readonly WASI_ENOSYS = 52;
+
+  /**
+   * Not supported, or operation not supported on socket.
+   */
+  static readonly WASI_ERRNO_NOTSUP = 58;
 
   /**
    * The clock measuring real time. Time value zero corresponds with 1970-01-01T00:00:00Z.
@@ -327,7 +334,11 @@ export class WASIAbi {
       event.nbytes ?? BigInt(0),
       true,
     );
-    memory.setUint16(ptr + layout.fdReadWrite.flagsOffset, 0, true);
+    memory.setUint16(
+      ptr + layout.fdReadWrite.flagsOffset,
+      event.hangup ? 1 : 0,
+      true,
+    );
   }
 
   writeFilestat(memory: DataView, ptr: number, filetype: number): void {

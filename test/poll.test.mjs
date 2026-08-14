@@ -180,3 +180,71 @@ describe("poll.usePoll", () => {
     assert.ok(sleptMs >= 40, `expected >=40ms requested, got ${sleptMs}ms`);
   });
 });
+
+describe("poll.usePoll with fdReadiness", () => {
+  const notReadyProvider = (wait) => ({
+    read: (fd) => (fd === 0 ? { ready: false } : null),
+    wait,
+  });
+
+  it("clock timeout fires while an fd stays not-ready", () => {
+    let waited = [];
+    const { view, imports } = makeImports({
+      fdReadiness: notReadyProvider((ms) => {
+        waited.push(ms);
+        // Pretend the timeout elapsed by advancing nothing; the clock check
+        // in the loop uses the real clock, so sleep a real 30ms here.
+        const end = performance.now() + ms;
+        while (performance.now() < end) {}
+      }),
+    });
+    writeClockSubscription(view, 0, {
+      userdata: 1,
+      clockId: CLOCK_MONOTONIC,
+      timeoutNs: 30_000_000, // 30ms
+    });
+    writeFdSubscription(view, SUBSCRIPTION_SIZE, {
+      userdata: 2,
+      eventType: EVENTTYPE_FD_READ,
+      fd: 0,
+    });
+    const errno = imports.poll_oneoff(0, 1024, 2, 2048);
+    assert.strictEqual(errno, 0);
+    assert.strictEqual(view.getUint32(2048, true), 1);
+    const event = readEvent(view, 1024);
+    assert.strictEqual(event.userdata, BigInt(1));
+    assert.strictEqual(event.type, EVENTTYPE_CLOCK);
+    assert.ok(waited.length >= 1 && waited[0] >= 25, `waited: ${waited}`);
+  });
+
+  it("unsatisfiable fd wait with no waiter and no clock returns NOTSUP", () => {
+    const { view, imports } = makeImports({
+      fdReadiness: { read: (fd) => (fd === 0 ? { ready: false } : null) },
+    });
+    writeFdSubscription(view, 0, {
+      userdata: 1,
+      eventType: EVENTTYPE_FD_READ,
+      fd: 0,
+    });
+    assert.strictEqual(imports.poll_oneoff(0, 1024, 1, 2048), 58);
+  });
+
+  it("hangup state is written to the event flags", () => {
+    const { view, imports } = makeImports({
+      fdReadiness: {
+        read: (fd) =>
+          fd === 0 ? { ready: true, nbytes: 0, hangup: true } : null,
+      },
+    });
+    writeFdSubscription(view, 0, {
+      userdata: 9,
+      eventType: EVENTTYPE_FD_READ,
+      fd: 0,
+    });
+    assert.strictEqual(imports.poll_oneoff(0, 1024, 1, 2048), 0);
+    const event = readEvent(view, 1024);
+    assert.strictEqual(event.type, EVENTTYPE_FD_READ);
+    assert.strictEqual(view.getBigUint64(1024 + 16, true), BigInt(0)); // nbytes
+    assert.strictEqual(view.getUint16(1024 + 24, true), 1); // hangup flag
+  });
+});
