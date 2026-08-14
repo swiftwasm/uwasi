@@ -9,7 +9,11 @@ export function useRandom(
     randomFillSync?: (buffer: Uint8Array) => void;
   } = {},
 ): WASIFeatureProvider {
-  const randomFillSync = useOptions.randomFillSync || crypto.getRandomValues;
+  // Keep `crypto` as the receiver: an unbound `getRandomValues` reference
+  // throws `ERR_INVALID_THIS` when called.
+  const randomFillSync =
+    useOptions.randomFillSync ||
+    ((buffer: Uint8Array) => crypto.getRandomValues(buffer));
   return (options, abi, memoryView) => {
     return {
       random_get: (bufferOffset: number, length: number) => {
