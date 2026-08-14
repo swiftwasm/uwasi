@@ -113,6 +113,33 @@ const wasi = new WASI({
 });
 ```
 
+### With `poll_oneoff` and `sched_yield` enabled
+
+`usePoll` supplies the blocking primitives that libc sleep functions
+(`nanosleep`, `usleep`, timed waits) are built on. Clock subscriptions block
+the calling thread until the earliest deadline using `Atomics.wait` where the
+host allows it, falling back to a busy-wait (e.g. on the browser main thread).
+Since all file descriptors in this runtime are synchronous, `fd_read`/`fd_write`
+subscriptions report ready immediately.
+
+```js
+import { WASI, useStdio, usePoll } from "uwasi";
+
+const wasi = new WASI({
+    features: [useStdio(), usePoll()],
+});
+```
+
+The blocking strategy is replaceable, e.g. to integrate with a host scheduler:
+
+```js
+const wasi = new WASI({
+    features: [usePoll({ sleep: (ms) => mySynchronousSleep(ms) })],
+});
+```
+
+`usePoll` is included in `useAll()`.
+
 ## Implementation Status
 
 Some of WASI system calls are not implemented yet. Contributions are welcome!
@@ -120,12 +147,12 @@ Some of WASI system calls are not implemented yet. Contributions are welcome!
 | Syscall | Status | Notes |
 |-------|----------|---------|
 | `args_XXX` | ✅ | |
-| `clock_XXX` | ✅ | Monotonic clock is unavailable due to JS API limitation |
+| `clock_XXX` | ✅ | CPU-time clocks are approximated by the monotonic clock |
 | `environ_XXX` | ✅ | |
 | `fd_XXX` | 🚧 | stdin/stdout/stderr are supported |
 | `path_XXX` | ❌ | |
-| `poll_oneoff` | ❌ | |
-| `proc_XXX` | ✅ | |
+| `poll_oneoff` | ✅ | Clock subscriptions block the thread (`Atomics.wait`, busy-wait fallback); fd subscriptions report ready immediately |
+| `proc_XXX` | ✅ | `proc_raise` exits with `128 + signal` |
 | `random_get` | ✅ | |
-| `sched_yield` | ❌ | |
+| `sched_yield` | ✅ | No-op success on a single-threaded host |
 | `sock_XXX` | ❌ | |

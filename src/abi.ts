@@ -1,3 +1,33 @@
+/**
+ * A parsed `subscription` record passed to `poll_oneoff`.
+ */
+export type WASISubscription =
+  | {
+      userdata: bigint;
+      type: "clock";
+      clockId: number;
+      /** Timeout in nanoseconds, relative or absolute depending on `flags`. */
+      timeout: bigint;
+      precision: bigint;
+      flags: number;
+    }
+  | {
+      userdata: bigint;
+      type: "fd_read" | "fd_write";
+      fd: number;
+    }
+  | { userdata: bigint; type: "unknown"; tag: number };
+
+/**
+ * An `event` record produced by `poll_oneoff`.
+ */
+export interface WASIEvent {
+  userdata: bigint;
+  error: number;
+  type: number;
+  nbytes?: bigint;
+}
+
 export class WASIAbi {
   /**
    * No error occurred. System call completed successfully.
@@ -24,6 +54,32 @@ export class WASIAbi {
    * The epoch of this clock is undefined. The absolute time value of this clock therefore has no meaning.
    */
   static readonly WASI_CLOCK_MONOTONIC = 1;
+  /**
+   * The CPU-time clock associated with the current process.
+   */
+  static readonly WASI_CLOCK_PROCESS_CPUTIME_ID = 2;
+  /**
+   * The CPU-time clock associated with the current thread.
+   */
+  static readonly WASI_CLOCK_THREAD_CPUTIME_ID = 3;
+
+  /**
+   * The time value of a clock has reached the timeout value specified in the subscription.
+   */
+  static readonly WASI_EVENTTYPE_CLOCK = 0;
+  /**
+   * File descriptor has data available for reading.
+   */
+  static readonly WASI_EVENTTYPE_FD_READ = 1;
+  /**
+   * File descriptor has capacity available for writing.
+   */
+  static readonly WASI_EVENTTYPE_FD_WRITE = 2;
+  /**
+   * Subscription clock flag: the specified timeout is an absolute deadline
+   * on the subscription's clock rather than a relative interval.
+   */
+  static readonly WASI_SUBCLOCKFLAGS_ABSTIME = 1;
 
   /**
    * The file descriptor or file refers to a directory.
@@ -185,6 +241,93 @@ export class WASIAbi {
       iovsOffset += WASIAbi.iovec_t.size;
     }
     return iovsBuffers;
+  }
+
+  private static readonly subscription_t = {
+    size: 48,
+    userdataOffset: 0,
+    // union tag byte of subscription_u
+    tagOffset: 8,
+    // payload of the union, 8-byte aligned after the tag
+    contentsOffset: 16,
+    clock: {
+      idOffset: 16,
+      timeoutOffset: 24,
+      precisionOffset: 32,
+      flagsOffset: 40,
+    },
+    fdReadWrite: {
+      fdOffset: 16,
+    },
+  };
+
+  static readonly event_t = {
+    size: 32,
+    userdataOffset: 0,
+    errorOffset: 8,
+    typeOffset: 10,
+    fdReadWrite: {
+      nbytesOffset: 16,
+      flagsOffset: 24,
+    },
+  };
+
+  readSubscriptions(
+    memory: DataView,
+    ptr: number,
+    count: number,
+  ): WASISubscription[] {
+    const subscriptions: WASISubscription[] = [];
+    const layout = WASIAbi.subscription_t;
+    for (let i = 0; i < count; i++) {
+      const base = ptr + i * layout.size;
+      const userdata = memory.getBigUint64(base + layout.userdataOffset, true);
+      const tag = memory.getUint8(base + layout.tagOffset);
+      switch (tag) {
+        case WASIAbi.WASI_EVENTTYPE_CLOCK:
+          subscriptions.push({
+            userdata,
+            type: "clock",
+            clockId: memory.getUint32(base + layout.clock.idOffset, true),
+            timeout: memory.getBigUint64(
+              base + layout.clock.timeoutOffset,
+              true,
+            ),
+            precision: memory.getBigUint64(
+              base + layout.clock.precisionOffset,
+              true,
+            ),
+            flags: memory.getUint16(base + layout.clock.flagsOffset, true),
+          });
+          break;
+        case WASIAbi.WASI_EVENTTYPE_FD_READ:
+        case WASIAbi.WASI_EVENTTYPE_FD_WRITE:
+          subscriptions.push({
+            userdata,
+            type:
+              tag === WASIAbi.WASI_EVENTTYPE_FD_READ ? "fd_read" : "fd_write",
+            fd: memory.getUint32(base + layout.fdReadWrite.fdOffset, true),
+          });
+          break;
+        default:
+          subscriptions.push({ userdata, type: "unknown", tag });
+          break;
+      }
+    }
+    return subscriptions;
+  }
+
+  writeEvent(memory: DataView, ptr: number, event: WASIEvent): void {
+    const layout = WASIAbi.event_t;
+    memory.setBigUint64(ptr + layout.userdataOffset, event.userdata, true);
+    memory.setUint16(ptr + layout.errorOffset, event.error, true);
+    memory.setUint8(ptr + layout.typeOffset, event.type);
+    memory.setBigUint64(
+      ptr + layout.fdReadWrite.nbytesOffset,
+      event.nbytes ?? BigInt(0),
+      true,
+    );
+    memory.setUint16(ptr + layout.fdReadWrite.flagsOffset, 0, true);
   }
 
   writeFilestat(memory: DataView, ptr: number, filetype: number): void {

@@ -4,11 +4,13 @@ import { useArgs } from "./args.js";
 import { useClock } from "./clock.js";
 import { useEnviron } from "./environ.js";
 import { useMemoryFS } from "./fd.js";
+import { usePoll } from "./poll.js";
 import { useProc } from "./proc.js";
 import { useRandom } from "./random.js";
 
 type Options = Parameters<typeof useMemoryFS>[0] &
-  Parameters<typeof useRandom>[0];
+  Parameters<typeof useRandom>[0] &
+  Parameters<typeof usePoll>[0];
 
 export function useAll(useOptions: Options = {}): WASIFeatureProvider {
   return (options: WASIOptions, abi: WASIAbi, memoryView: () => DataView) => {
@@ -17,6 +19,7 @@ export function useAll(useOptions: Options = {}): WASIFeatureProvider {
       useEnviron,
       useArgs,
       useClock,
+      usePoll(useOptions),
       useProc,
       useRandom(useOptions),
     ];
