@@ -1,7 +1,5 @@
 {
   "WASI Rust tests": {
-    "sched_yield": "not implemented yet",
-    "poll_oneoff_stdio": "not implemented yet",
     "path_rename": "not implemented yet",
     "fd_advise": "not implemented yet",
     "path_exists": "not implemented yet",
