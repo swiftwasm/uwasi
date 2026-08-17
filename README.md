@@ -113,19 +113,150 @@ const wasi = new WASI({
 });
 ```
 
+### With `poll_oneoff` and `sched_yield` enabled
+
+`usePoll` supplies the blocking primitives that libc sleep functions
+(`nanosleep`, `usleep`, timed waits) are built on. Clock subscriptions block
+the calling thread until the earliest deadline using `Atomics.wait` where the
+host allows it, falling back to a busy-wait (e.g. on the browser main thread).
+Since all file descriptors in this runtime are synchronous, `fd_read`/`fd_write`
+subscriptions report ready immediately.
+
+```js
+import { WASI, useStdio, usePoll } from "uwasi";
+
+const wasi = new WASI({
+    features: [useStdio(), usePoll()],
+});
+```
+
+The blocking strategy is replaceable, e.g. to integrate with a host scheduler:
+
+```js
+const wasi = new WASI({
+    features: [usePoll({ sleep: (ms) => mySynchronousSleep(ms) })],
+});
+```
+
+`usePoll` is included in `useAll()`.
+
+### Genuine stdin readiness with `SharedInputChannel`
+
+For readiness-driven guests (e.g. `poll(2)`-based event loops or libdispatch
+fd sources), `SharedInputChannel` connects a producing thread — a worker
+pumping a pipe, or a UI thread collecting keystrokes — to the guest thread
+over a `SharedArrayBuffer` ring. `poll_oneoff` then genuinely parks the guest
+(`Atomics.wait`) until input arrives, end of file, or a clock deadline, and
+reads drain the buffer without blocking. Producer close is delivered as an
+fd hangup event (`POLLHUP` through libc `poll`).
+
+```js
+// Guest thread
+import { WASI, useStdio, usePoll, SharedInputChannel } from "uwasi";
+const channel = new SharedInputChannel();
+// hand channel.sharedBuffer to the producing thread...
+const wasi = new WASI({
+    features: [
+        useStdio({ stdin: channel.stdin() }),
+        usePoll({ fdReadiness: channel.fdReadiness() }),
+    ],
+});
+
+// Producing thread (worker or main thread)
+const producer = new SharedInputChannel(sharedBufferFromGuestThread);
+producer.push(new TextEncoder().encode("hello"));
+producer.close(); // end of file
+```
+
+`Atomics.wait` is unavailable on a browser main thread, so run the guest in a
+worker there; waits degrade to a busy-wait otherwise. In browsers,
+`SharedArrayBuffer` additionally requires the page to be cross-origin
+isolated (`Cross-Origin-Opener-Policy: same-origin` and
+`Cross-Origin-Embedder-Policy: require-corp` response headers). Node.js and
+worker threads need no special setup.
+
 ## Implementation Status
 
-Some of WASI system calls are not implemented yet. Contributions are welcome!
+43 of the 46 WASI preview1 functions are implemented (the three
+socket-transfer calls are deliberately absent — preview1 sockets are
+vestigial and were replaced wholesale in preview2). The filesystem surface
+is provided by `useMemoryFS` and validated against the full
+[wasi-testsuite](https://github.com/WebAssembly/wasi-testsuite) with zero
+skipped cases; `useStdio` provides the stdio subset only.
 
 | Syscall | Status | Notes |
 |-------|----------|---------|
-| `args_XXX` | ✅ | |
-| `clock_XXX` | ✅ | Monotonic clock is unavailable due to JS API limitation |
-| `environ_XXX` | ✅ | |
-| `fd_XXX` | 🚧 | stdin/stdout/stderr are supported |
-| `path_XXX` | ❌ | |
-| `poll_oneoff` | ❌ | |
-| `proc_XXX` | ✅ | |
+| `args_get` / `args_sizes_get` | ✅ | |
+| `clock_res_get` / `clock_time_get` | ✅ | CPU-time clocks are approximated by the monotonic clock |
+| `environ_get` / `environ_sizes_get` | ✅ | |
+| `fd_advise` | ✅ | Validates the advice; otherwise a no-op |
+| `fd_allocate` | ✅ | Grows the file to `offset + len`, never shrinks |
+| `fd_close` | ✅ | Preopens are closable |
+| `fd_datasync` / `fd_sync` | ✅ | No-op success (memory is always "synced") |
+| `fd_fdstat_get` | ✅ | Reports real per-fd flags and rights |
+| `fd_fdstat_set_flags` | ✅ | `APPEND` honored by `fd_write` |
+| `fd_fdstat_set_rights` | ✅ | Rights may only shrink (`NOTCAPABLE` otherwise) |
+| `fd_filestat_get` | ✅ | Stable per-node inodes, real sizes and timestamps |
+| `fd_filestat_set_size` | ✅ | Zero-fills growth |
+| `fd_filestat_set_times` | ✅ | Validates `fstflags` combinations |
+| `fd_pread` / `fd_pwrite` | ✅ | Positional; never move the cursor; `pwrite` ignores `APPEND` |
+| `fd_prestat_get` / `fd_prestat_dir_name` | ✅ | |
+| `fd_read` / `fd_write` | ✅ | Rights-checked; `APPEND` writes at end of file |
+| `fd_readdir` | ✅ | Cookie-paged with `.`/`..` entries and real inodes |
+| `fd_renumber` | ✅ | Destination must be open; source is closed |
+| `fd_seek` / `fd_tell` | ✅ | `ISDIR` on directories, `SPIPE` on character devices, `INVAL` on negative seek |
+| `path_create_directory` | ✅ | Single level; parent must exist |
+| `path_filestat_get` | ✅ | `SYMLINK_FOLLOW` honored |
+| `path_filestat_set_times` | ✅ | Symlink-aware (lstat-level timestamps) |
+| `path_link` | ✅ | Hard links with shared inode and `nlink` accounting |
+| `path_open` | ✅ | Full `oflags`/`fdflags`/rights semantics; sandboxed path resolution |
+| `path_readlink` | ✅ | Silent truncation to the buffer, no NUL |
+| `path_remove_directory` | ✅ | `NOTEMPTY` on non-empty directories |
+| `path_rename` | ✅ | POSIX replace semantics incl. empty-directory targets |
+| `path_symlink` | ✅ | Relative targets only; dangling links allowed |
+| `path_unlink_file` | ✅ | Removes symlinks without following |
+| `poll_oneoff` | ✅ | Clock subscriptions block the thread (`Atomics.wait`, busy-wait fallback); fd subscriptions report ready immediately by default, or genuine readiness via `SharedInputChannel`/`fdReadiness` |
+| `proc_exit` | ✅ | |
+| `proc_raise` | ✅ | Exits with `128 + signal` |
 | `random_get` | ✅ | |
-| `sched_yield` | ❌ | |
-| `sock_XXX` | ❌ | |
+| `sched_yield` | ✅ | No-op success on a single-threaded host |
+| `sock_shutdown` | ✅ | Error reporting only (`BADF` / `NOTSOCK`) |
+| `sock_accept` / `sock_recv` / `sock_send` | ❌ | Deliberately absent; superseded by preview2 `wasi:sockets` |
+
+Path resolution is sandboxed per directory fd: `.`/`..`/`//` normalize,
+`..` cannot escape the fd, absolute paths and absolute symlink targets are
+rejected (`PERM`), intermediate symlinks always expand, and the final
+symlink expands only with `LOOKUPFLAGS_SYMLINK_FOLLOW` (loop budget 32,
+then `LOOP`).
+
+## Spec conformance notes
+
+uwasi targets WASI preview1. Four behaviors deliberately go beyond or beside
+the letter of the preview1 spec; all are defaults chosen for compatibility on
+single-threaded JavaScript hosts, and all guest-visible surface remains the
+plain `wasi_snapshot_preview1` namespace:
+
+- **CPU-time clocks (`clockid` 2/3) are answered with the monotonic clock.**
+  Preview2 dropped these clocks as impractical to implement, and
+  [wasi-clocks](https://github.com/WebAssembly/wasi-clocks) documents
+  wasi-libc's strategy of emulating them with the monotonic clock — uwasi
+  applies the same sanctioned emulation at the host. (wasmtime instead
+  rejects these clock IDs.)
+- **Without a readiness provider, `poll_oneoff` fd subscriptions report
+  ready immediately** with nominal `nbytes` (1 for reads, 65536 for writes)
+  rather than actual availability. Wire `usePoll({ fdReadiness })` (e.g. via
+  `SharedInputChannel`) for genuine readiness. Preview2 removed byte counts
+  from poll results entirely; preview3 removed readiness polling.
+- **`poll_oneoff` returns `ENOTSUP` for waits that can never complete**
+  (not-ready fds with no way to wait and no clock deadline) instead of
+  blocking forever on the only thread. Preview1 does not define this failure
+  mode; preview3's completion-based async dissolves the problem.
+- **`proc_raise` terminates with exit code `128 + signal` for every
+  signal.** There is no signal machinery to deliver to; modern wasi-libc no
+  longer calls `proc_raise`, and preview2/preview3 removed signals.
+
+Host-side APIs beyond the preview1 surface (`usePoll`'s `sleep`/
+`fdReadiness` options, `SharedInputChannel`) are embedder configuration,
+invisible to guests. They intentionally mirror preview2 shapes — a
+`WASIFdReadiness` is a `pollable`, a `SharedInputChannel` is an
+`input-stream` producer — so a future preview2 host layer can reuse them.

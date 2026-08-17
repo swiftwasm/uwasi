@@ -13,7 +13,9 @@ export function useClock(
     clock_res_get: (clockId: number, resolution: number) => {
       let resolutionValue: number;
       switch (clockId) {
-        case WASIAbi.WASI_CLOCK_MONOTONIC: {
+        case WASIAbi.WASI_CLOCK_MONOTONIC:
+        case WASIAbi.WASI_CLOCK_PROCESS_CPUTIME_ID:
+        case WASIAbi.WASI_CLOCK_THREAD_CPUTIME_ID: {
           // https://developer.mozilla.org/en-US/docs/Web/API/Performance/now
           resolutionValue = 5000;
           break;
@@ -33,7 +35,14 @@ export function useClock(
     clock_time_get: (clockId: number, precision: number, time: number) => {
       let nowMs: number = 0;
       switch (clockId) {
-        case WASIAbi.WASI_CLOCK_MONOTONIC: {
+        // CPU-time clocks are approximated with the monotonic clock: JS
+        // hosts expose no CPU-time source, and on a single-threaded host
+        // uptime is the closest observable value. This mirrors wasi-libc's
+        // own compatibility strategy after preview2 dropped these clocks
+        // (https://github.com/WebAssembly/wasi-clocks).
+        case WASIAbi.WASI_CLOCK_MONOTONIC:
+        case WASIAbi.WASI_CLOCK_PROCESS_CPUTIME_ID:
+        case WASIAbi.WASI_CLOCK_THREAD_CPUTIME_ID: {
           nowMs = performance.now();
           break;
         }

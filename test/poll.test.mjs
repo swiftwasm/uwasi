@@ -1,0 +1,370 @@
+import { usePoll } from "../lib/esm/index.js";
+import { WASIAbi } from "../lib/esm/abi.js";
+import { describe, it } from "node:test";
+import assert from "node:assert";
+
+const EVENTTYPE_CLOCK = 0;
+const EVENTTYPE_FD_READ = 1;
+const EVENTTYPE_FD_WRITE = 2;
+const SUBCLOCKFLAGS_ABSTIME = 1;
+const CLOCK_REALTIME = 0;
+const CLOCK_MONOTONIC = 1;
+
+const SUBSCRIPTION_SIZE = 48;
+const EVENT_SIZE = 32;
+
+function makeImports(useOptions = {}) {
+  const memory = new ArrayBuffer(65536);
+  const view = new DataView(memory);
+  const abi = new WASIAbi();
+  const imports = usePoll(useOptions)({}, abi, () => view);
+  return { view, imports };
+}
+
+function writeClockSubscription(
+  view,
+  ptr,
+  { userdata, clockId, timeoutNs, flags = 0 },
+) {
+  view.setBigUint64(ptr, BigInt(userdata), true);
+  view.setUint8(ptr + 8, EVENTTYPE_CLOCK);
+  view.setUint32(ptr + 16, clockId, true);
+  view.setBigUint64(ptr + 24, BigInt(timeoutNs), true);
+  view.setBigUint64(ptr + 32, BigInt(0), true); // precision
+  view.setUint16(ptr + 40, flags, true);
+}
+
+function writeFdSubscription(view, ptr, { userdata, eventType, fd }) {
+  view.setBigUint64(ptr, BigInt(userdata), true);
+  view.setUint8(ptr + 8, eventType);
+  view.setUint32(ptr + 16, fd, true);
+}
+
+function readEvent(view, ptr) {
+  return {
+    userdata: view.getBigUint64(ptr, true),
+    error: view.getUint16(ptr + 8, true),
+    type: view.getUint8(ptr + 10),
+  };
+}
+
+describe("poll.usePoll", () => {
+  it("sched_yield returns success", () => {
+    const { imports } = makeImports();
+    assert.strictEqual(imports.sched_yield(), 0);
+  });
+
+  it("poll_oneoff with zero subscriptions returns EINVAL", () => {
+    const { imports } = makeImports();
+    assert.strictEqual(imports.poll_oneoff(0, 0, 0, 1024), 28);
+  });
+
+  it("relative monotonic clock subscription sleeps until the deadline", () => {
+    const { view, imports } = makeImports();
+    const subsPtr = 0;
+    const eventsPtr = 1024;
+    const neventsPtr = 2048;
+    writeClockSubscription(view, subsPtr, {
+      userdata: 42,
+      clockId: CLOCK_MONOTONIC,
+      timeoutNs: 50_000_000, // 50ms
+    });
+    const before = performance.now();
+    const errno = imports.poll_oneoff(subsPtr, eventsPtr, 1, neventsPtr);
+    const elapsed = performance.now() - before;
+    assert.strictEqual(errno, 0);
+    assert.strictEqual(view.getUint32(neventsPtr, true), 1);
+    const event = readEvent(view, eventsPtr);
+    assert.strictEqual(event.userdata, BigInt(42));
+    assert.strictEqual(event.error, 0);
+    assert.strictEqual(event.type, EVENTTYPE_CLOCK);
+    assert.ok(elapsed >= 45, `slept only ${elapsed}ms, expected ~50ms`);
+  });
+
+  it("absolute realtime deadline in the past returns immediately", () => {
+    const { view, imports } = makeImports();
+    writeClockSubscription(view, 0, {
+      userdata: 7,
+      clockId: CLOCK_REALTIME,
+      timeoutNs: BigInt(Date.now() - 1000) * BigInt(1_000_000),
+      flags: SUBCLOCKFLAGS_ABSTIME,
+    });
+    const before = performance.now();
+    const errno = imports.poll_oneoff(0, 1024, 1, 2048);
+    const elapsed = performance.now() - before;
+    assert.strictEqual(errno, 0);
+    assert.strictEqual(view.getUint32(2048, true), 1);
+    assert.ok(elapsed < 25, `expected immediate return, took ${elapsed}ms`);
+  });
+
+  it("fd_write readiness wins over a pending clock timeout", () => {
+    const { view, imports } = makeImports();
+    writeClockSubscription(view, 0, {
+      userdata: 1,
+      clockId: CLOCK_MONOTONIC,
+      timeoutNs: 1_000_000_000, // 1s; must not be awaited
+    });
+    writeFdSubscription(view, SUBSCRIPTION_SIZE, {
+      userdata: 2,
+      eventType: EVENTTYPE_FD_WRITE,
+      fd: 1,
+    });
+    const before = performance.now();
+    const errno = imports.poll_oneoff(0, 1024, 2, 2048);
+    const elapsed = performance.now() - before;
+    assert.strictEqual(errno, 0);
+    assert.strictEqual(view.getUint32(2048, true), 1);
+    const event = readEvent(view, 1024);
+    assert.strictEqual(event.userdata, BigInt(2));
+    assert.strictEqual(event.type, EVENTTYPE_FD_WRITE);
+    assert.ok(elapsed < 100, `expected immediate return, took ${elapsed}ms`);
+  });
+
+  it("fd_read subscriptions are immediately ready", () => {
+    const { view, imports } = makeImports();
+    writeFdSubscription(view, 0, {
+      userdata: 3,
+      eventType: EVENTTYPE_FD_READ,
+      fd: 0,
+    });
+    const errno = imports.poll_oneoff(0, 1024, 1, 2048);
+    assert.strictEqual(errno, 0);
+    assert.strictEqual(view.getUint32(2048, true), 1);
+    const event = readEvent(view, 1024);
+    assert.strictEqual(event.userdata, BigInt(3));
+    assert.strictEqual(event.type, EVENTTYPE_FD_READ);
+  });
+
+  it("earliest of several clock subscriptions fires", () => {
+    const { view, imports } = makeImports();
+    writeClockSubscription(view, 0, {
+      userdata: 10,
+      clockId: CLOCK_MONOTONIC,
+      timeoutNs: 1_000_000_000, // 1s
+    });
+    writeClockSubscription(view, SUBSCRIPTION_SIZE, {
+      userdata: 11,
+      clockId: CLOCK_MONOTONIC,
+      timeoutNs: 30_000_000, // 30ms
+    });
+    const before = performance.now();
+    const errno = imports.poll_oneoff(0, 1024, 2, 2048);
+    const elapsed = performance.now() - before;
+    assert.strictEqual(errno, 0);
+    assert.strictEqual(view.getUint32(2048, true), 1);
+    const event = readEvent(view, 1024);
+    assert.strictEqual(event.userdata, BigInt(11));
+    assert.ok(
+      elapsed >= 25 && elapsed < 500,
+      `expected ~30ms sleep, took ${elapsed}ms`,
+    );
+  });
+
+  it("a custom sleep function is used for clock waits", () => {
+    let sleptMs = 0;
+    const { view, imports } = makeImports({
+      sleep: (ms) => {
+        sleptMs += ms;
+      },
+    });
+    writeClockSubscription(view, 0, {
+      userdata: 1,
+      clockId: CLOCK_MONOTONIC,
+      timeoutNs: 40_000_000, // 40ms
+    });
+    // The no-op sleep forces the wait loop to spin on the real clock, so
+    // total requested sleep will exceed the original 40ms; just assert the
+    // custom function was called with a sensible initial value.
+    const errno = imports.poll_oneoff(0, 1024, 1, 2048);
+    assert.strictEqual(errno, 0);
+    assert.ok(sleptMs >= 40, `expected >=40ms requested, got ${sleptMs}ms`);
+  });
+});
+
+describe("poll.usePoll with fdReadiness", () => {
+  const notReadyProvider = (wait) => ({
+    read: (fd) => (fd === 0 ? { ready: false } : null),
+    wait,
+  });
+
+  it("clock timeout fires while an fd stays not-ready", () => {
+    let waited = [];
+    const { view, imports } = makeImports({
+      fdReadiness: notReadyProvider((ms) => {
+        waited.push(ms);
+        // Pretend the timeout elapsed by advancing nothing; the clock check
+        // in the loop uses the real clock, so sleep a real 30ms here.
+        const end = performance.now() + ms;
+        while (performance.now() < end) {}
+      }),
+    });
+    writeClockSubscription(view, 0, {
+      userdata: 1,
+      clockId: CLOCK_MONOTONIC,
+      timeoutNs: 30_000_000, // 30ms
+    });
+    writeFdSubscription(view, SUBSCRIPTION_SIZE, {
+      userdata: 2,
+      eventType: EVENTTYPE_FD_READ,
+      fd: 0,
+    });
+    const errno = imports.poll_oneoff(0, 1024, 2, 2048);
+    assert.strictEqual(errno, 0);
+    assert.strictEqual(view.getUint32(2048, true), 1);
+    const event = readEvent(view, 1024);
+    assert.strictEqual(event.userdata, BigInt(1));
+    assert.strictEqual(event.type, EVENTTYPE_CLOCK);
+    assert.ok(waited.length >= 1 && waited[0] >= 25, `waited: ${waited}`);
+  });
+
+  it("unsatisfiable fd wait with no waiter and no clock returns NOTSUP", () => {
+    const { view, imports } = makeImports({
+      fdReadiness: { read: (fd) => (fd === 0 ? { ready: false } : null) },
+    });
+    writeFdSubscription(view, 0, {
+      userdata: 1,
+      eventType: EVENTTYPE_FD_READ,
+      fd: 0,
+    });
+    assert.strictEqual(imports.poll_oneoff(0, 1024, 1, 2048), 58);
+  });
+
+  it("hangup state is written to the event flags", () => {
+    const { view, imports } = makeImports({
+      fdReadiness: {
+        read: (fd) =>
+          fd === 0 ? { ready: true, nbytes: 0, hangup: true } : null,
+      },
+    });
+    writeFdSubscription(view, 0, {
+      userdata: 9,
+      eventType: EVENTTYPE_FD_READ,
+      fd: 0,
+    });
+    assert.strictEqual(imports.poll_oneoff(0, 1024, 1, 2048), 0);
+    const event = readEvent(view, 1024);
+    assert.strictEqual(event.type, EVENTTYPE_FD_READ);
+    assert.strictEqual(view.getBigUint64(1024 + 16, true), BigInt(0)); // nbytes
+    assert.strictEqual(view.getUint16(1024 + 24, true), 1); // hangup flag
+  });
+});
+
+describe("poll.usePoll edge cases", () => {
+  it("unknown subscription tag returns EINVAL", () => {
+    const { view, imports } = makeImports();
+    view.setBigUint64(0, BigInt(1), true);
+    view.setUint8(8, 7); // not a valid eventtype
+    assert.strictEqual(imports.poll_oneoff(0, 1024, 1, 2048), 28);
+  });
+
+  it("clock subscription with an unsupported clock ID reports ENOSYS in the event", () => {
+    const { view, imports } = makeImports();
+    writeClockSubscription(view, 0, {
+      userdata: 5,
+      clockId: 99,
+      timeoutNs: 1_000_000,
+    });
+    assert.strictEqual(imports.poll_oneoff(0, 1024, 1, 2048), 0);
+    assert.strictEqual(view.getUint32(2048, true), 1);
+    const event = readEvent(view, 1024);
+    assert.strictEqual(event.userdata, BigInt(5));
+    assert.strictEqual(event.error, 52); // ENOSYS
+    assert.strictEqual(event.type, EVENTTYPE_CLOCK);
+  });
+
+  it("absolute monotonic deadline in the future sleeps until it", () => {
+    const { view, imports } = makeImports();
+    // Read the current monotonic value the same way the implementation does.
+    const nowNs =
+      BigInt(Math.trunc(performance.now())) * BigInt(1_000_000) +
+      BigInt(Math.round((performance.now() % 1) * 1_000_000));
+    writeClockSubscription(view, 0, {
+      userdata: 8,
+      clockId: CLOCK_MONOTONIC,
+      timeoutNs: nowNs + BigInt(40_000_000), // +40ms absolute
+      flags: SUBCLOCKFLAGS_ABSTIME,
+    });
+    const before = performance.now();
+    assert.strictEqual(imports.poll_oneoff(0, 1024, 1, 2048), 0);
+    const elapsed = performance.now() - before;
+    assert.strictEqual(view.getUint32(2048, true), 1);
+    assert.ok(
+      elapsed >= 30 && elapsed < 500,
+      `expected ~40ms sleep, took ${elapsed}ms`,
+    );
+  });
+
+  it("write-side readiness probe gates fd_write subscriptions", () => {
+    const { view, imports } = makeImports({
+      fdReadiness: {
+        write: (fd) => (fd === 1 ? { ready: false } : null),
+      },
+    });
+    writeClockSubscription(view, 0, {
+      userdata: 1,
+      clockId: CLOCK_MONOTONIC,
+      timeoutNs: 30_000_000,
+    });
+    writeFdSubscription(view, SUBSCRIPTION_SIZE, {
+      userdata: 2,
+      eventType: EVENTTYPE_FD_WRITE,
+      fd: 1,
+    });
+    assert.strictEqual(imports.poll_oneoff(0, 1024, 2, 2048), 0);
+    assert.strictEqual(view.getUint32(2048, true), 1);
+    assert.strictEqual(readEvent(view, 1024).userdata, BigInt(1)); // clock won
+  });
+
+  it("write-side readiness probe reports nbytes when ready", () => {
+    const { view, imports } = makeImports({
+      fdReadiness: {
+        write: (fd) => (fd === 1 ? { ready: true, nbytes: 123 } : null),
+      },
+    });
+    writeFdSubscription(view, 0, {
+      userdata: 2,
+      eventType: EVENTTYPE_FD_WRITE,
+      fd: 1,
+    });
+    assert.strictEqual(imports.poll_oneoff(0, 1024, 1, 2048), 0);
+    assert.strictEqual(view.getBigUint64(1024 + 16, true), BigInt(123));
+  });
+
+  it("a null from the provider falls back to always-ready for that fd", () => {
+    const { view, imports } = makeImports({
+      fdReadiness: {
+        read: (fd) => (fd === 0 ? { ready: false } : null),
+        wait: () => {},
+      },
+    });
+    // fd 5 is not covered by the provider, so it is immediately ready.
+    writeFdSubscription(view, 0, {
+      userdata: 9,
+      eventType: EVENTTYPE_FD_READ,
+      fd: 5,
+    });
+    assert.strictEqual(imports.poll_oneoff(0, 1024, 1, 2048), 0);
+    assert.strictEqual(view.getUint32(2048, true), 1);
+    assert.strictEqual(readEvent(view, 1024).userdata, BigInt(9));
+  });
+
+  it("readiness probes keep their receiver (`this`)", () => {
+    class Provider {
+      constructor() {
+        this.state = { ready: true, nbytes: 7 };
+      }
+      read(fd) {
+        // Throws if `this` was stripped by the caller.
+        return fd === 0 ? this.state : null;
+      }
+    }
+    const { view, imports } = makeImports({ fdReadiness: new Provider() });
+    writeFdSubscription(view, 0, {
+      userdata: 1,
+      eventType: EVENTTYPE_FD_READ,
+      fd: 0,
+    });
+    assert.strictEqual(imports.poll_oneoff(0, 1024, 1, 2048), 0);
+    assert.strictEqual(view.getBigUint64(1024 + 16, true), BigInt(7));
+  });
+});
