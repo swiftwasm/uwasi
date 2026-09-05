@@ -22,15 +22,16 @@ export function useClock(): WASIFeatureProvider {
             break;
           }
           case WASIAbi.WASI_CLOCK_REALTIME: {
-            resolutionValue = 1000;
+            // Date.now() is millisecond-granular.
+            resolutionValue = 1_000_000;
             break;
           }
           default:
             return WASIAbi.WASI_ENOSYS;
         }
         const view = memoryView();
-        // 64-bit integer, but only the lower 32 bits are used.
-        view.setUint32(resolution, resolutionValue, true);
+        // A u64: writing only the low half leaves the guest's stale upper bytes.
+        view.setBigUint64(resolution, BigInt(resolutionValue), true);
         return WASIAbi.WASI_ESUCCESS;
       },
       clock_time_get: (clockId: number, precision: number, time: number) => {
