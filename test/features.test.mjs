@@ -148,3 +148,28 @@ describe("WASI features", () => {
     assert.deepStrictEqual(written, ["hi"]);
   });
 });
+
+describe("WASI.setInstance", () => {
+  it("binds an instance without invoking an entry point", () => {
+    const wasi = new WASI({ args: ["prog"], env: {}, features: [useArgs()] });
+    const memory = new WebAssembly.Memory({ initial: 1 });
+    wasi.setInstance({ exports: { memory } });
+
+    assert.strictEqual(wasi.wasiImport.args_sizes_get(0, 4), 0);
+    const view = new DataView(memory.buffer);
+    assert.strictEqual(view.getUint32(0, true), 1);
+    assert.strictEqual(view.getUint32(4, true), "prog\0".length);
+  });
+
+  it("can rebind a second instance, which initialize() forbids", () => {
+    const wasi = new WASI({ args: ["prog"], env: {}, features: [useArgs()] });
+    wasi.setInstance({
+      exports: { memory: new WebAssembly.Memory({ initial: 1 }) },
+    });
+    const second = new WebAssembly.Memory({ initial: 1 });
+    wasi.setInstance({ exports: { memory: second } });
+
+    assert.strictEqual(wasi.wasiImport.args_sizes_get(0, 4), 0);
+    assert.strictEqual(new DataView(second.buffer).getUint32(0, true), 1);
+  });
+});

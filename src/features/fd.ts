@@ -96,6 +96,55 @@ export class ReadableTextProxy implements FdEntry {
   close(): void {}
 }
 
+/**
+ * Wrap a stdio handler so it receives whole lines, without the newline.
+ *
+ * A handler is called with whatever the guest passed to one `fd_write`, which
+ * is not a line: one `printf` can arrive split across writes, and one write
+ * can carry several lines. Pass `outputBuffers: true` alongside so the bytes
+ * arrive undecoded, and a character split across two writes is joined before
+ * decoding instead of becoming replacement characters.
+ *
+ * Nothing flushes automatically. Text with no trailing newline is held until
+ * one arrives, so a guest that exits mid-line leaves it unwritten; call
+ * `flush()` to emit it.
+ */
+export function lineBuffered(
+  write: (line: string) => void,
+): ((chunk: string | Uint8Array) => void) & { flush(): void } {
+  const decoder = new TextDecoder("utf-8", { fatal: false });
+  let pending = "";
+
+  const emitCompleteLines = () => {
+    const lines = pending.split("\n");
+    pending = lines.pop() ?? "";
+    for (const line of lines) {
+      write(line);
+    }
+  };
+
+  const handler = (chunk: string | Uint8Array) => {
+    if (typeof chunk === "string") {
+      // A string cannot complete a half-decoded character, so drain the
+      // decoder first rather than letting those bytes span this text.
+      pending += decoder.decode() + chunk;
+    } else {
+      pending += decoder.decode(chunk, { stream: true });
+    }
+    emitCompleteLines();
+  };
+
+  handler.flush = () => {
+    pending += decoder.decode();
+    if (pending.length > 0) {
+      write(pending);
+      pending = "";
+    }
+  };
+
+  return handler;
+}
+
 export type StdioOptions = {
   stdin?: () => string | Uint8Array;
   stdout?: (lines: string | Uint8Array) => void;

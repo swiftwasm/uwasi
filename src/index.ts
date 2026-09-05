@@ -11,6 +11,7 @@ export {
   useStdio,
   useMemoryFS,
   MemoryFileSystem,
+  lineBuffered,
 } from "./features/fd.js";
 export * from "./features/poll.js";
 export * from "./features/proc.js";
@@ -86,6 +87,17 @@ export class WASI {
       throw new Error("instance.exports.memory is not a WebAssembly.Memory");
     }
     return new DataView(this.instance.exports.memory.buffer);
+  }
+
+  /**
+   * Bind `instance` for syscalls without invoking `_start` or `_initialize`.
+   *
+   * `start()` and `initialize()` each run one and refuse a second call, so a
+   * host instantiating the same module again — one instance per thread — has
+   * no other way to point the syscalls at the new memory.
+   */
+  setInstance(instance: WebAssembly.Instance): void {
+    this.instance = instance;
   }
 
   /**

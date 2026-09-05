@@ -2,6 +2,7 @@ import {
   MemoryFileSystem,
   ReadableTextProxy,
   useMemoryFS,
+  lineBuffered,
 } from "../lib/esm/features/fd.js";
 import { WASIAbi } from "../lib/esm/abi.js";
 import { describe, it } from "node:test";
@@ -374,6 +375,74 @@ describe("fd.useMemoryFS read-boundary compaction", () => {
     assert.ok(
       buffers.size <= 24,
       `expected O(log n) reallocations across 300 open/append/close cycles, saw ${buffers.size}`,
+    );
+  });
+});
+
+describe("fd.lineBuffered", () => {
+  const encode = (text) => new TextEncoder().encode(text);
+  const collect = (chunks) => {
+    const lines = [];
+    const write = lineBuffered((line) => lines.push(line));
+    for (const chunk of chunks) write(chunk);
+    return lines;
+  };
+
+  it("emits whole lines without the newline", () => {
+    assert.deepStrictEqual(collect([encode("one\ntwo\n")]), ["one", "two"]);
+  });
+
+  it("holds an unterminated fragment until a newline arrives", () => {
+    assert.deepStrictEqual(collect([encode("par")]), []);
+    assert.deepStrictEqual(collect([encode("par"), encode("tial\n")]), [
+      "partial",
+    ]);
+  });
+
+  it("keeps empty lines", () => {
+    assert.deepStrictEqual(collect([encode("\n\n")]), ["", ""]);
+  });
+
+  it("joins a character split across two writes", () => {
+    // "✓" is E2 9C 93, cut between the second and third byte.
+    assert.deepStrictEqual(
+      collect([new Uint8Array([0xe2, 0x9c]), new Uint8Array([0x93, 0x0a])]),
+      ["✓"],
+    );
+  });
+
+  it("accepts already-decoded strings", () => {
+    assert.deepStrictEqual(collect(["a\nb\n"]), ["a", "b"]);
+  });
+
+  it("flush emits text with no trailing newline", () => {
+    const lines = [];
+    const write = lineBuffered((line) => lines.push(line));
+    write(encode("no newline here"));
+    assert.deepStrictEqual(lines, [], "held until asked for");
+    write.flush();
+    assert.deepStrictEqual(lines, ["no newline here"]);
+  });
+
+  it("flush on an empty buffer writes nothing", () => {
+    const lines = [];
+    const write = lineBuffered((line) => lines.push(line));
+    write(encode("done\n"));
+    write.flush();
+    assert.deepStrictEqual(lines, ["done"]);
+  });
+
+  it("a string does not let pending bytes span it", () => {
+    // Half of "✓" (E2 9C), then text, then the byte that would complete it.
+    // A string cannot continue a byte sequence, so the half character
+    // resolves where it arrived instead of reordering after the text.
+    assert.deepStrictEqual(
+      collect([
+        new Uint8Array([0xe2, 0x9c]),
+        "x\n",
+        new Uint8Array([0x93, 0x0a]),
+      ]),
+      ["\ufffdx", "\ufffd"],
     );
   });
 });
