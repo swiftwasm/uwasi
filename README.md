@@ -175,14 +175,55 @@ isolated (`Cross-Origin-Opener-Policy: same-origin` and
 `Cross-Origin-Embedder-Policy: require-corp` response headers). Node.js and
 worker threads need no special setup.
 
+### Durable files over OPFS with `useOPFS`
+
+`useOPFS` provides the same filesystem surface as `useMemoryFS`, backed by
+the [Origin Private File System](https://developer.mozilla.org/en-US/docs/Web/API/File_System_API/Origin_private_file_system)
+so files survive page reloads and worker restarts. It runs over OPFS sync
+access handles, which browsers only expose in workers, so instantiate it in
+a worker. The backend needs asynchronous setup (acquiring access handles),
+so it is constructed up front and handed to the feature:
+
+```js
+import { WASI, useOPFS, OPFSBackend } from "uwasi";
+
+const backend = await OPFSBackend.create(
+    await navigator.storage.getDirectory(),
+);
+const wasi = new WASI({
+    features: [useOPFS({ withBackend: backend })],
+});
+// ... run the guest ...
+await backend.close(); // graceful shutdown; a dying worker is also safe
+```
+
+The directory handed to `OPFSBackend.create` becomes a *mapped store* owned
+by uwasi (content files with opaque names plus a checksummed namespace
+record), not a 1:1 mirror of the guest tree; unrelated files already in the
+directory are ignored and untouched. Namespace changes (create, unlink,
+rename) are durable when the syscall returns, and `fd_sync`/`fd_datasync`
+really flush — ordered so that sidecar-file lifecycles survive a crashed
+worker: a rollback journal unlinked at commit can never resurrect into the
+next worker, and one that was not unlinked survives byte-for-byte.
+
+Files can be seeded through `backend.fileSystem` (a `MemoryFileSystem`)
+before the guest starts; call `await backend.persistAll()` afterwards to
+push them to storage. Creating files is synchronous thanks to a pool of
+pre-created spares (`spareFiles` option, default 16); a burst that creates
+more files than that stays correct but defers content durability until the
+event loop turns (`fd_sync` fails honestly with `NOSPC` until then, and
+`await backend.settle()` catches the pool up). Hard links return `NOTSUP`.
+
 ## Implementation Status
 
 43 of the 46 WASI preview1 functions are implemented (the three
 socket-transfer calls are deliberately absent — preview1 sockets are
 vestigial and were replaced wholesale in preview2). The filesystem surface
-is provided by `useMemoryFS` and validated against the full
+is provided by `useMemoryFS` (in-memory) and `useOPFS` (durable, browser
+workers), both validated against the full
 [wasi-testsuite](https://github.com/WebAssembly/wasi-testsuite) with zero
-skipped cases; `useStdio` provides the stdio subset only.
+skipped cases (`useOPFS` differs only in refusing hard links with
+`NOTSUP`); `useStdio` provides the stdio subset only.
 
 | Syscall | Status | Notes |
 |-------|----------|---------|
@@ -192,7 +233,7 @@ skipped cases; `useStdio` provides the stdio subset only.
 | `fd_advise` | ✅ | Validates the advice; otherwise a no-op |
 | `fd_allocate` | ✅ | Grows the file to `offset + len`, never shrinks |
 | `fd_close` | ✅ | Preopens are closable |
-| `fd_datasync` / `fd_sync` | ✅ | No-op success (memory is always "synced") |
+| `fd_datasync` / `fd_sync` | ✅ | Memory FS: no-op success (memory is always "synced"); OPFS: a real `flush()` of the sync access handle |
 | `fd_fdstat_get` | ✅ | Reports real per-fd flags and rights |
 | `fd_fdstat_set_flags` | ✅ | `APPEND` honored by `fd_write` |
 | `fd_fdstat_set_rights` | ✅ | Rights may only shrink (`NOTCAPABLE` otherwise) |
@@ -208,7 +249,7 @@ skipped cases; `useStdio` provides the stdio subset only.
 | `path_create_directory` | ✅ | Single level; parent must exist |
 | `path_filestat_get` | ✅ | `SYMLINK_FOLLOW` honored |
 | `path_filestat_set_times` | ✅ | Symlink-aware (lstat-level timestamps) |
-| `path_link` | ✅ | Hard links with shared inode and `nlink` accounting |
+| `path_link` | ✅ | Memory FS: hard links with shared inode and `nlink` accounting; OPFS: `NOTSUP` (one name per file in the durable namespace record) |
 | `path_open` | ✅ | Full `oflags`/`fdflags`/rights semantics; sandboxed path resolution |
 | `path_readlink` | ✅ | Silent truncation to the buffer, no NUL |
 | `path_remove_directory` | ✅ | `NOTEMPTY` on non-empty directories |
