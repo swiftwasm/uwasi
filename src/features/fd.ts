@@ -316,7 +316,7 @@ interface NodeMeta {
 /**
  * Represents a node in the file system that is a directory.
  */
-interface DirectoryNode extends NodeMeta {
+export interface DirectoryNode extends NodeMeta {
   readonly type: "dir";
   entries: Record<string, FSNode>;
 }
@@ -324,7 +324,7 @@ interface DirectoryNode extends NodeMeta {
 /**
  * Represents a node in the file system that is a file.
  */
-interface FileNode extends NodeMeta {
+export interface FileNode extends NodeMeta {
   readonly type: "file";
   content: Uint8Array;
   nlink: number;
@@ -333,7 +333,7 @@ interface FileNode extends NodeMeta {
 /**
  * Represents a symbolic link.
  */
-interface SymlinkNode extends NodeMeta {
+export interface SymlinkNode extends NodeMeta {
   readonly type: "symlink";
   target: string;
 }
@@ -347,7 +347,11 @@ type CharacterDeviceNode = (
 /**
  * Union type representing any node in the file system.
  */
-type FSNode = DirectoryNode | FileNode | SymlinkNode | CharacterDeviceNode;
+export type FSNode =
+  | DirectoryNode
+  | FileNode
+  | SymlinkNode
+  | CharacterDeviceNode;
 
 let nextIno = 1;
 function nowNs(): bigint {
@@ -753,7 +757,10 @@ function filetypeOf(node: FSNode): number {
 
 const MEMFS_DEV = BigInt(1);
 
-function statOf(node: FSNode): {
+function statOf(
+  backend: FSBackend,
+  node: FSNode,
+): {
   dev: bigint;
   ino: bigint;
   nlink: bigint;
@@ -765,7 +772,7 @@ function statOf(node: FSNode): {
   let size = 0;
   let nlink = 1;
   if (node.type === "file") {
-    size = node.content.byteLength;
+    size = backend.fileSize(node);
     nlink = node.nlink;
   } else if (node.type === "symlink") {
     size = new TextEncoder().encode(node.target).byteLength;
@@ -900,6 +907,126 @@ function applyTimes(
 }
 
 /**
+ * Storage backend behind the file-system syscalls.
+ *
+ * The syscall layer in this file owns everything WASI-shaped: path
+ * resolution, rights, errno mapping, the fd table, seek cursors, readdir
+ * cookies and inode metadata. A backend owns only where the bytes and the
+ * namespace live: file contents behind `readAt`/`writeAt`/`resize`, and
+ * directory membership behind `createChild`/`removeChild`/`renameChild`.
+ *
+ * Every method is synchronous, because the syscall path is synchronous. A
+ * backend that needs asynchronous setup (acquiring handles, reading a name
+ * map) must complete it while being constructed, before WASI starts; from
+ * then on each of these calls must finish before returning.
+ *
+ * The node tree doubles as the backend's in-memory namespace mirror: path
+ * resolution and `readdir` read `DirectoryNode.entries` directly, so the
+ * namespace methods must keep `entries` exact as they persist the change.
+ * `sync`/`datasync`/`openFile`/`closeFile` are real pass-through points:
+ * they are called on the syscall path even where this in-memory backend has
+ * nothing to do, so a durable backend can flush or manage handles there.
+ */
+export interface FSBackend {
+  /** Current size of the file in bytes. */
+  fileSize(node: FileNode): number;
+  /** Read into `buf` from `offset`; returns bytes read, short at EOF. */
+  readAt(node: FileNode, buf: Uint8Array, offset: number): number;
+  /**
+   * Write `data` at `offset`, extending the file (zero-filling any gap) if
+   * it ends past EOF. Returns an errno.
+   */
+  writeAt(node: FileNode, data: Uint8Array, offset: number): number;
+  /** Truncate or zero-fill-extend the file to `size`. Returns an errno. */
+  resize(node: FileNode, size: number): number;
+  /** Flush data and metadata for `fd_sync`. Returns an errno. */
+  sync(node: FileNode | DirectoryNode): number;
+  /** Flush data for `fd_datasync`. Returns an errno. */
+  datasync(node: FileNode | DirectoryNode): number;
+  /** A file is about to get an fd; claim any handle. Returns an errno. */
+  openFile(node: FileNode): number;
+  /** The fd over this file was closed; release any handle. */
+  closeFile(node: FileNode): void;
+  /** Link `node` into `parent` under `name`. Returns an errno. */
+  createChild(parent: DirectoryNode, name: string, node: FSNode): number;
+  /** Unlink `name` from `parent`. Returns an errno. */
+  removeChild(parent: DirectoryNode, name: string): number;
+  /**
+   * Move the node at `fromName` to `toName`, replacing any node already
+   * there. Returns an errno.
+   */
+  renameChild(
+    fromParent: DirectoryNode,
+    fromName: string,
+    toParent: DirectoryNode,
+    toName: string,
+  ): number;
+  /** Child names of `dir`, in the stable order `readdir` cookies index. */
+  listChildren(dir: DirectoryNode): string[];
+}
+
+/**
+ * The in-memory backend: file bytes live in `FileNode.content` and the
+ * namespace is the node tree itself, so persistence points are no-ops.
+ */
+export class MemoryFSBackend implements FSBackend {
+  fileSize(node: FileNode): number {
+    return node.content.byteLength;
+  }
+  readAt(node: FileNode, buf: Uint8Array, offset: number): number {
+    const data = node.content;
+    if (offset >= data.byteLength) return 0;
+    const count = Math.min(buf.byteLength, data.byteLength - offset);
+    buf.set(data.subarray(offset, offset + count));
+    return count;
+  }
+  writeAt(node: FileNode, data: Uint8Array, offset: number): number {
+    const end = offset + data.byteLength;
+    if (end > node.content.byteLength) {
+      const errno = resizeFile(node, end);
+      if (errno !== WASIAbi.WASI_ESUCCESS) return errno;
+    }
+    node.content.set(data, offset);
+    return WASIAbi.WASI_ESUCCESS;
+  }
+  resize(node: FileNode, size: number): number {
+    return resizeFile(node, size);
+  }
+  sync(_node: FileNode | DirectoryNode): number {
+    return WASIAbi.WASI_ESUCCESS;
+  }
+  datasync(_node: FileNode | DirectoryNode): number {
+    return WASIAbi.WASI_ESUCCESS;
+  }
+  openFile(_node: FileNode): number {
+    return WASIAbi.WASI_ESUCCESS;
+  }
+  closeFile(_node: FileNode): void {}
+  createChild(parent: DirectoryNode, name: string, node: FSNode): number {
+    parent.entries[name] = node;
+    return WASIAbi.WASI_ESUCCESS;
+  }
+  removeChild(parent: DirectoryNode, name: string): number {
+    delete parent.entries[name];
+    return WASIAbi.WASI_ESUCCESS;
+  }
+  renameChild(
+    fromParent: DirectoryNode,
+    fromName: string,
+    toParent: DirectoryNode,
+    toName: string,
+  ): number {
+    const node = fromParent.entries[fromName];
+    delete fromParent.entries[fromName];
+    toParent.entries[toName] = node;
+    return WASIAbi.WASI_ESUCCESS;
+  }
+  listChildren(dir: DirectoryNode): string[] {
+    return Object.keys(dir.entries);
+  }
+}
+
+/**
  * Creates a feature provider that implements a complete in-memory file system.
  *
  * This provides implementations for all file descriptor and path-related WASI
@@ -956,726 +1083,766 @@ export function useMemoryFS(
   ) => {
     const fileSystem =
       useOptions.withFileSystem || new MemoryFileSystem(wasiOptions.preopens);
-    const files = new Map<FileDescriptor, OpenFile>();
+    return bindFSSyscalls(
+      new MemoryFSBackend(),
+      fileSystem,
+      useOptions.withStdio || {},
+      abi,
+      memoryView,
+    );
+  };
+}
 
-    bindStdio(useOptions.withStdio || {}).forEach((entry, fd) => {
-      files.set(fd, {
-        node: stampMeta({ type: "character", kind: "stdio", entry }),
+/**
+ * Bind the file-system syscalls to `backend`, with `fileSystem` supplying
+ * the node tree and preopens. This is the syscall layer every backend
+ * shares: path resolution, rights, errno mapping and fd bookkeeping behave
+ * exactly as they do under `useMemoryFS`, whichever backend holds the bytes.
+ */
+export function bindFSSyscalls(
+  backend: FSBackend,
+  fileSystem: MemoryFileSystem,
+  withStdio: StdioOptions,
+  abi: WASIAbi,
+  memoryView: () => DataView,
+): WebAssembly.ModuleImports {
+  const files = new Map<FileDescriptor, OpenFile>();
+
+  bindStdio(withStdio).forEach((entry, fd) => {
+    files.set(fd, {
+      node: stampMeta({ type: "character", kind: "stdio", entry }),
+      position: 0,
+      fdflags: 0,
+      rightsBase:
+        RIGHTS.FD_READ |
+        RIGHTS.FD_WRITE |
+        RIGHTS.FD_FDSTAT_SET_FLAGS |
+        RIGHTS.FD_FILESTAT_GET |
+        RIGHTS.POLL_FD_READWRITE,
+      rightsInheriting: BIG_ZERO,
+      isPreopen: false,
+    });
+  });
+
+  let nextFd = 3;
+  for (const preopenPath of fileSystem.getPreopenPaths()) {
+    const node = fileSystem.lookup(preopenPath);
+    if (node && node.type === "dir") {
+      files.set(nextFd, {
+        node,
         position: 0,
         fdflags: 0,
-        rightsBase:
-          RIGHTS.FD_READ |
-          RIGHTS.FD_WRITE |
-          RIGHTS.FD_FDSTAT_SET_FLAGS |
-          RIGHTS.FD_FILESTAT_GET |
-          RIGHTS.POLL_FD_READWRITE,
-        rightsInheriting: BIG_ZERO,
-        isPreopen: false,
+        rightsBase: DIRECTORY_RIGHTS,
+        rightsInheriting: ALL_RIGHTS,
+        isPreopen: true,
+        preopenPath,
       });
-    });
-
-    let nextFd = 3;
-    for (const preopenPath of fileSystem.getPreopenPaths()) {
-      const node = fileSystem.lookup(preopenPath);
-      if (node && node.type === "dir") {
-        files.set(nextFd, {
-          node,
-          position: 0,
-          fdflags: 0,
-          rightsBase: DIRECTORY_RIGHTS,
-          rightsInheriting: ALL_RIGHTS,
-          isPreopen: true,
-          preopenPath,
-        });
-        nextFd++;
-      }
+      nextFd++;
     }
+  }
 
-    const getFile = (fd: FileDescriptor): OpenFile | null =>
-      files.get(fd) ?? null;
+  const getFile = (fd: FileDescriptor): OpenFile | null =>
+    files.get(fd) ?? null;
 
-    /** Resolve a path syscall's dirfd + path pair. */
-    const resolveAt = (
+  /** Resolve a path syscall's dirfd + path pair. */
+  const resolveAt = (
+    fd: number,
+    pathPtr: number,
+    pathLen: number,
+    followFinal: boolean,
+  ):
+    | { errno: number }
+    | ({ errno?: undefined; dir: OpenFile } & ResolveSuccess) => {
+    const dir = getFile(fd);
+    if (!dir) return { errno: WASIAbi.WASI_ERRNO_BADF };
+    if (dir.node.type !== "dir") {
+      return { errno: WASIAbi.WASI_ERRNO_NOTDIR };
+    }
+    const view = memoryView();
+    const path = abi.readString(view, pathPtr, pathLen);
+    const result = resolvePath(dir.node, path, followFinal);
+    if (result.errno !== undefined) return { errno: result.errno };
+    return { dir, ...result };
+  };
+
+  return {
+    fd_advise: (fd: number, _offset: bigint, _len: bigint, advice: number) => {
+      const file = getFile(fd);
+      if (!file) return WASIAbi.WASI_ERRNO_BADF;
+      if (advice > 5) return WASIAbi.WASI_ERRNO_INVAL;
+      return WASIAbi.WASI_ESUCCESS;
+    },
+
+    fd_allocate: (fd: number, offset: bigint, len: bigint) => {
+      const file = getFile(fd);
+      if (!file) return WASIAbi.WASI_ERRNO_BADF;
+      if (file.node.type === "dir") return WASIAbi.WASI_ERRNO_ISDIR;
+      if (file.node.type !== "file") return WASIAbi.WASI_ERRNO_NOTSUP;
+      const end = Number(offset) + Number(len);
+      if (end > backend.fileSize(file.node)) {
+        const errno = backend.resize(file.node, end);
+        if (errno !== WASIAbi.WASI_ESUCCESS) return errno;
+      }
+      return WASIAbi.WASI_ESUCCESS;
+    },
+
+    fd_close: (fd: number) => {
+      const file = getFile(fd);
+      if (!file) return WASIAbi.WASI_ERRNO_BADF;
+      if (file.node.type === "character" && file.node.kind === "stdio") {
+        file.node.entry.close();
+      } else if (file.node.type === "file") {
+        backend.closeFile(file.node);
+      }
+      files.delete(fd);
+      return WASIAbi.WASI_ESUCCESS;
+    },
+
+    fd_datasync: (fd: number) => {
+      const file = getFile(fd);
+      if (!file) return WASIAbi.WASI_ERRNO_BADF;
+      if (file.node.type === "file" || file.node.type === "dir") {
+        return backend.datasync(file.node);
+      }
+      return WASIAbi.WASI_ESUCCESS;
+    },
+
+    fd_sync: (fd: number) => {
+      const file = getFile(fd);
+      if (!file) return WASIAbi.WASI_ERRNO_BADF;
+      if (file.node.type === "file" || file.node.type === "dir") {
+        return backend.sync(file.node);
+      }
+      return WASIAbi.WASI_ESUCCESS;
+    },
+
+    fd_fdstat_get: (fd: number, buf: number) => {
+      const file = getFile(fd);
+      if (!file) return WASIAbi.WASI_ERRNO_BADF;
+      const view = memoryView();
+      view.setUint8(buf, filetypeOf(file.node));
+      view.setUint16(buf + 2, file.fdflags, true);
+      view.setBigUint64(buf + 8, file.rightsBase, true);
+      view.setBigUint64(buf + 16, file.rightsInheriting, true);
+      return WASIAbi.WASI_ESUCCESS;
+    },
+
+    fd_fdstat_set_flags: (fd: number, flags: number) => {
+      const file = getFile(fd);
+      if (!file) return WASIAbi.WASI_ERRNO_BADF;
+      file.fdflags = flags;
+      return WASIAbi.WASI_ESUCCESS;
+    },
+
+    fd_fdstat_set_rights: (fd: number, base: bigint, inheriting: bigint) => {
+      const file = getFile(fd);
+      if (!file) return WASIAbi.WASI_ERRNO_BADF;
+      // Rights may only shrink, never grow.
+      if (
+        (base & (ALL_RIGHTS ^ file.rightsBase)) !== BIG_ZERO ||
+        (inheriting & (ALL_RIGHTS ^ file.rightsInheriting)) !== BIG_ZERO
+      ) {
+        return WASIAbi.WASI_ERRNO_NOTCAPABLE;
+      }
+      file.rightsBase = base;
+      file.rightsInheriting = inheriting;
+      return WASIAbi.WASI_ESUCCESS;
+    },
+
+    fd_filestat_get: (fd: number, buf: number) => {
+      const file = getFile(fd);
+      if (!file) return WASIAbi.WASI_ERRNO_BADF;
+      const view = memoryView();
+      abi.writeFilestat(
+        view,
+        buf,
+        filetypeOf(file.node),
+        statOf(backend, file.node),
+      );
+      return WASIAbi.WASI_ESUCCESS;
+    },
+
+    fd_filestat_set_size: (fd: number, size: bigint) => {
+      const file = getFile(fd);
+      if (!file) return WASIAbi.WASI_ERRNO_BADF;
+      if (file.node.type !== "file") return WASIAbi.WASI_ERRNO_INVAL;
+      const errno = backend.resize(file.node, Number(size));
+      if (errno !== WASIAbi.WASI_ESUCCESS) return errno;
+      return WASIAbi.WASI_ESUCCESS;
+    },
+
+    fd_filestat_set_times: (
       fd: number,
-      pathPtr: number,
-      pathLen: number,
-      followFinal: boolean,
-    ):
-      | { errno: number }
-      | ({ errno?: undefined; dir: OpenFile } & ResolveSuccess) => {
-      const dir = getFile(fd);
-      if (!dir) return { errno: WASIAbi.WASI_ERRNO_BADF };
-      if (dir.node.type !== "dir") {
-        return { errno: WASIAbi.WASI_ERRNO_NOTDIR };
+      atim: bigint,
+      mtim: bigint,
+      fstflags: number,
+    ) => {
+      if (!validateFstflags(fstflags)) return WASIAbi.WASI_ERRNO_INVAL;
+      const file = getFile(fd);
+      if (!file) return WASIAbi.WASI_ERRNO_BADF;
+      applyTimes(file.node, atim, mtim, fstflags);
+      return WASIAbi.WASI_ESUCCESS;
+    },
+
+    fd_pread: (
+      fd: number,
+      iovs: number,
+      iovsLen: number,
+      offset: bigint,
+      nread: number,
+    ) => {
+      const file = getFile(fd);
+      if (!file) return WASIAbi.WASI_ERRNO_BADF;
+      if (file.node.type === "dir") return WASIAbi.WASI_ERRNO_ISDIR;
+      if (file.node.type !== "file") return WASIAbi.WASI_ERRNO_SPIPE;
+      if ((file.rightsBase & RIGHTS.FD_READ) === BIG_ZERO) {
+        return WASIAbi.WASI_ERRNO_NOTCAPABLE;
       }
       const view = memoryView();
-      const path = abi.readString(view, pathPtr, pathLen);
-      const result = resolvePath(dir.node, path, followFinal);
-      if (result.errno !== undefined) return { errno: result.errno };
-      return { dir, ...result };
-    };
+      const iovViews = abi.iovViews(view, iovs, iovsLen);
+      let position = Number(offset);
+      let totalRead = 0;
+      for (const buf of iovViews) {
+        const count = backend.readAt(file.node, buf, position);
+        position += count;
+        totalRead += count;
+        if (count < buf.byteLength) break;
+      }
+      view.setUint32(nread, totalRead, true);
+      return WASIAbi.WASI_ESUCCESS;
+    },
 
-    return {
-      fd_advise: (
-        fd: number,
-        _offset: bigint,
-        _len: bigint,
-        advice: number,
-      ) => {
-        const file = getFile(fd);
-        if (!file) return WASIAbi.WASI_ERRNO_BADF;
-        if (advice > 5) return WASIAbi.WASI_ERRNO_INVAL;
-        return WASIAbi.WASI_ESUCCESS;
-      },
-
-      fd_allocate: (fd: number, offset: bigint, len: bigint) => {
-        const file = getFile(fd);
-        if (!file) return WASIAbi.WASI_ERRNO_BADF;
-        if (file.node.type === "dir") return WASIAbi.WASI_ERRNO_ISDIR;
-        if (file.node.type !== "file") return WASIAbi.WASI_ERRNO_NOTSUP;
-        const end = Number(offset) + Number(len);
-        if (end > file.node.content.byteLength) {
-          const errno = resizeFile(file.node, end);
-          if (errno !== WASIAbi.WASI_ESUCCESS) return errno;
-        }
-        return WASIAbi.WASI_ESUCCESS;
-      },
-
-      fd_close: (fd: number) => {
-        const file = getFile(fd);
-        if (!file) return WASIAbi.WASI_ERRNO_BADF;
-        if (file.node.type === "character" && file.node.kind === "stdio") {
-          file.node.entry.close();
-        }
-        files.delete(fd);
-        return WASIAbi.WASI_ESUCCESS;
-      },
-
-      fd_datasync: (fd: number) => {
-        return getFile(fd) ? WASIAbi.WASI_ESUCCESS : WASIAbi.WASI_ERRNO_BADF;
-      },
-
-      fd_sync: (fd: number) => {
-        return getFile(fd) ? WASIAbi.WASI_ESUCCESS : WASIAbi.WASI_ERRNO_BADF;
-      },
-
-      fd_fdstat_get: (fd: number, buf: number) => {
-        const file = getFile(fd);
-        if (!file) return WASIAbi.WASI_ERRNO_BADF;
-        const view = memoryView();
-        view.setUint8(buf, filetypeOf(file.node));
-        view.setUint16(buf + 2, file.fdflags, true);
-        view.setBigUint64(buf + 8, file.rightsBase, true);
-        view.setBigUint64(buf + 16, file.rightsInheriting, true);
-        return WASIAbi.WASI_ESUCCESS;
-      },
-
-      fd_fdstat_set_flags: (fd: number, flags: number) => {
-        const file = getFile(fd);
-        if (!file) return WASIAbi.WASI_ERRNO_BADF;
-        file.fdflags = flags;
-        return WASIAbi.WASI_ESUCCESS;
-      },
-
-      fd_fdstat_set_rights: (fd: number, base: bigint, inheriting: bigint) => {
-        const file = getFile(fd);
-        if (!file) return WASIAbi.WASI_ERRNO_BADF;
-        // Rights may only shrink, never grow.
-        if (
-          (base & (ALL_RIGHTS ^ file.rightsBase)) !== BIG_ZERO ||
-          (inheriting & (ALL_RIGHTS ^ file.rightsInheriting)) !== BIG_ZERO
-        ) {
-          return WASIAbi.WASI_ERRNO_NOTCAPABLE;
-        }
-        file.rightsBase = base;
-        file.rightsInheriting = inheriting;
-        return WASIAbi.WASI_ESUCCESS;
-      },
-
-      fd_filestat_get: (fd: number, buf: number) => {
-        const file = getFile(fd);
-        if (!file) return WASIAbi.WASI_ERRNO_BADF;
-        const view = memoryView();
-        abi.writeFilestat(view, buf, filetypeOf(file.node), statOf(file.node));
-        return WASIAbi.WASI_ESUCCESS;
-      },
-
-      fd_filestat_set_size: (fd: number, size: bigint) => {
-        const file = getFile(fd);
-        if (!file) return WASIAbi.WASI_ERRNO_BADF;
-        if (file.node.type !== "file") return WASIAbi.WASI_ERRNO_INVAL;
-        const errno = resizeFile(file.node, Number(size));
+    fd_pwrite: (
+      fd: number,
+      iovs: number,
+      iovsLen: number,
+      offset: bigint,
+      nwritten: number,
+    ) => {
+      const file = getFile(fd);
+      if (!file) return WASIAbi.WASI_ERRNO_BADF;
+      if (file.node.type === "dir") return WASIAbi.WASI_ERRNO_ISDIR;
+      if (file.node.type !== "file") return WASIAbi.WASI_ERRNO_SPIPE;
+      if ((file.rightsBase & RIGHTS.FD_WRITE) === BIG_ZERO) {
+        return WASIAbi.WASI_ERRNO_NOTCAPABLE;
+      }
+      const view = memoryView();
+      const iovViews = abi.iovViews(view, iovs, iovsLen);
+      // pwrite writes at the explicit offset, ignoring APPEND and the
+      // current cursor, and never moves the cursor.
+      let position = Number(offset);
+      const total = iovViews.reduce((acc, b) => acc + b.byteLength, 0);
+      if (position + total > backend.fileSize(file.node)) {
+        const errno = backend.resize(file.node, position + total);
         if (errno !== WASIAbi.WASI_ESUCCESS) return errno;
-        return WASIAbi.WASI_ESUCCESS;
-      },
+      }
+      for (const buf of iovViews) {
+        const errno = backend.writeAt(file.node, buf, position);
+        if (errno !== WASIAbi.WASI_ESUCCESS) return errno;
+        position += buf.byteLength;
+      }
+      file.node.mtim = nowNs();
+      view.setUint32(nwritten, total, true);
+      return WASIAbi.WASI_ESUCCESS;
+    },
 
-      fd_filestat_set_times: (
-        fd: number,
-        atim: bigint,
-        mtim: bigint,
-        fstflags: number,
-      ) => {
-        if (!validateFstflags(fstflags)) return WASIAbi.WASI_ERRNO_INVAL;
-        const file = getFile(fd);
-        if (!file) return WASIAbi.WASI_ERRNO_BADF;
-        applyTimes(file.node, atim, mtim, fstflags);
-        return WASIAbi.WASI_ESUCCESS;
-      },
+    fd_read: (fd: number, iovs: number, iovsLen: number, nread: number) => {
+      const file = getFile(fd);
+      if (!file) return WASIAbi.WASI_ERRNO_BADF;
+      if (file.node.type === "dir") return WASIAbi.WASI_ERRNO_ISDIR;
+      const view = memoryView();
+      const iovViews = abi.iovViews(view, iovs, iovsLen);
 
-      fd_pread: (
-        fd: number,
-        iovs: number,
-        iovsLen: number,
-        offset: bigint,
-        nread: number,
-      ) => {
-        const file = getFile(fd);
-        if (!file) return WASIAbi.WASI_ERRNO_BADF;
-        if (file.node.type === "dir") return WASIAbi.WASI_ERRNO_ISDIR;
-        if (file.node.type !== "file") return WASIAbi.WASI_ERRNO_SPIPE;
-        if ((file.rightsBase & RIGHTS.FD_READ) === BIG_ZERO) {
-          return WASIAbi.WASI_ERRNO_NOTCAPABLE;
-        }
-        const view = memoryView();
-        const iovViews = abi.iovViews(view, iovs, iovsLen);
-        const data = file.node.content;
-        let position = Number(offset);
-        let totalRead = 0;
-        for (const buf of iovViews) {
-          const available = data.byteLength - position;
-          if (available <= 0) break;
-          const count = Math.min(buf.byteLength, available);
-          buf.set(data.subarray(position, position + count));
-          position += count;
-          totalRead += count;
-          if (count < buf.byteLength) break;
-        }
-        view.setUint32(nread, totalRead, true);
-        return WASIAbi.WASI_ESUCCESS;
-      },
-
-      fd_pwrite: (
-        fd: number,
-        iovs: number,
-        iovsLen: number,
-        offset: bigint,
-        nwritten: number,
-      ) => {
-        const file = getFile(fd);
-        if (!file) return WASIAbi.WASI_ERRNO_BADF;
-        if (file.node.type === "dir") return WASIAbi.WASI_ERRNO_ISDIR;
-        if (file.node.type !== "file") return WASIAbi.WASI_ERRNO_SPIPE;
-        if ((file.rightsBase & RIGHTS.FD_WRITE) === BIG_ZERO) {
-          return WASIAbi.WASI_ERRNO_NOTCAPABLE;
-        }
-        const view = memoryView();
-        const iovViews = abi.iovViews(view, iovs, iovsLen);
-        // pwrite writes at the explicit offset, ignoring APPEND and the
-        // current cursor, and never moves the cursor.
-        let position = Number(offset);
-        const total = iovViews.reduce((acc, b) => acc + b.byteLength, 0);
-        if (position + total > file.node.content.byteLength) {
-          const errno = resizeFile(file.node, position + total);
-          if (errno !== WASIAbi.WASI_ESUCCESS) return errno;
-        }
-        for (const buf of iovViews) {
-          file.node.content.set(buf, position);
-          position += buf.byteLength;
-        }
-        file.node.mtim = nowNs();
-        view.setUint32(nwritten, total, true);
-        return WASIAbi.WASI_ESUCCESS;
-      },
-
-      fd_read: (fd: number, iovs: number, iovsLen: number, nread: number) => {
-        const file = getFile(fd);
-        if (!file) return WASIAbi.WASI_ERRNO_BADF;
-        if (file.node.type === "dir") return WASIAbi.WASI_ERRNO_ISDIR;
-        const view = memoryView();
-        const iovViews = abi.iovViews(view, iovs, iovsLen);
-
-        if (file.node.type === "character") {
-          if (file.node.kind === "stdio") {
-            const bytesRead = file.node.entry.readv(iovViews);
-            view.setUint32(nread, bytesRead, true);
-          } else {
-            view.setUint32(nread, 0, true);
-          }
-          return WASIAbi.WASI_ESUCCESS;
-        }
-        if (file.node.type !== "file") return WASIAbi.WASI_ERRNO_INVAL;
-        if ((file.rightsBase & RIGHTS.FD_READ) === BIG_ZERO) {
-          return WASIAbi.WASI_ERRNO_NOTCAPABLE;
-        }
-
-        const data = file.node.content;
-        let totalRead = 0;
-        for (const buf of iovViews) {
-          const available = data.byteLength - file.position - totalRead;
-          if (available <= 0) break;
-          const count = Math.min(buf.byteLength, available);
-          const start = file.position + totalRead;
-          buf.set(data.subarray(start, start + count));
-          totalRead += count;
-          if (count < buf.byteLength) break;
-        }
-        file.position += totalRead;
-        view.setUint32(nread, totalRead, true);
-        return WASIAbi.WASI_ESUCCESS;
-      },
-
-      fd_readdir: (
-        fd: number,
-        buf: number,
-        bufLen: number,
-        cookie: bigint,
-        bufusedPtr: number,
-      ) => {
-        const file = getFile(fd);
-        if (!file) return WASIAbi.WASI_ERRNO_BADF;
-        if (file.node.type !== "dir") return WASIAbi.WASI_ERRNO_NOTDIR;
-        const view = memoryView();
-        const dir = file.node;
-        const names = Object.keys(dir.entries);
-        const entries: { name: string; ino: bigint; type: number }[] = [
-          {
-            name: ".",
-            ino: dir.ino,
-            type: WASIAbi.WASI_FILETYPE_DIRECTORY,
-          },
-          {
-            name: "..",
-            ino: dir.ino,
-            type: WASIAbi.WASI_FILETYPE_DIRECTORY,
-          },
-          ...names.map((name) => ({
-            name,
-            ino: dir.entries[name].ino,
-            type: filetypeOf(dir.entries[name]),
-          })),
-        ];
-        const bufferEnd = buf + bufLen;
-        let ptr = buf;
-        for (let i = Number(cookie); i < entries.length; i++) {
-          const written = abi.writeDirent(view, ptr, bufferEnd, {
-            nextCookie: BigInt(i + 1),
-            ino: entries[i].ino,
-            name: entries[i].name,
-            type: entries[i].type,
-          });
-          ptr += written;
-          if (ptr >= bufferEnd) break;
-        }
-        view.setUint32(bufusedPtr, ptr - buf, true);
-        return WASIAbi.WASI_ESUCCESS;
-      },
-
-      fd_renumber: (from: number, to: number) => {
-        const source = getFile(from);
-        if (!source) return WASIAbi.WASI_ERRNO_BADF;
-        if (from === to) return WASIAbi.WASI_ESUCCESS;
-        // The destination must be an already-open fd; renumber replaces it.
-        const target = getFile(to);
-        if (!target) return WASIAbi.WASI_ERRNO_BADF;
-        if (target.node.type === "character" && target.node.kind === "stdio") {
-          target.node.entry.close();
-        }
-        files.set(to, source);
-        files.delete(from);
-        return WASIAbi.WASI_ESUCCESS;
-      },
-
-      fd_seek: (
-        fd: number,
-        offset: bigint,
-        whence: number,
-        newOffsetPtr: number,
-      ) => {
-        const file = getFile(fd);
-        if (!file) return WASIAbi.WASI_ERRNO_BADF;
-        if (file.node.type === "dir") return WASIAbi.WASI_ERRNO_ISDIR;
-        if (file.node.type !== "file") return WASIAbi.WASI_ERRNO_SPIPE;
-        const delta = Number(offset);
-        let position: number;
-        switch (whence) {
-          case WASIAbi.WASI_WHENCE_SET:
-            position = delta;
-            break;
-          case WASIAbi.WASI_WHENCE_CUR:
-            position = file.position + delta;
-            break;
-          case WASIAbi.WASI_WHENCE_END:
-            position = file.node.content.byteLength + delta;
-            break;
-          default:
-            return WASIAbi.WASI_ERRNO_INVAL;
-        }
-        if (position < 0) return WASIAbi.WASI_ERRNO_INVAL;
-        file.position = position;
-        const view = memoryView();
-        view.setBigUint64(newOffsetPtr, BigInt(position), true);
-        return WASIAbi.WASI_ESUCCESS;
-      },
-
-      fd_tell: (fd: number, offsetPtr: number) => {
-        const file = getFile(fd);
-        if (!file) return WASIAbi.WASI_ERRNO_BADF;
-        if (file.node.type === "dir") return WASIAbi.WASI_ERRNO_ISDIR;
-        if (file.node.type !== "file") return WASIAbi.WASI_ERRNO_SPIPE;
-        const view = memoryView();
-        view.setBigUint64(offsetPtr, BigInt(file.position), true);
-        return WASIAbi.WASI_ESUCCESS;
-      },
-
-      fd_write: (
-        fd: number,
-        iovs: number,
-        iovsLen: number,
-        nwritten: number,
-      ) => {
-        const file = getFile(fd);
-        if (!file) return WASIAbi.WASI_ERRNO_BADF;
-        if (file.node.type === "dir") return WASIAbi.WASI_ERRNO_ISDIR;
-        const view = memoryView();
-        const iovViews = abi.iovViews(view, iovs, iovsLen);
-
-        if (file.node.type === "character") {
-          if (file.node.kind === "stdio") {
-            const bytesWritten = file.node.entry.writev(iovViews);
-            view.setUint32(nwritten, bytesWritten, true);
-          } else {
-            const total = iovViews.reduce((acc, b) => acc + b.byteLength, 0);
-            view.setUint32(nwritten, total, true);
-          }
-          return WASIAbi.WASI_ESUCCESS;
-        }
-        if (file.node.type !== "file") return WASIAbi.WASI_ERRNO_INVAL;
-        if ((file.rightsBase & RIGHTS.FD_WRITE) === BIG_ZERO) {
-          return WASIAbi.WASI_ERRNO_NOTCAPABLE;
-        }
-
-        let position =
-          (file.fdflags & WASIAbi.WASI_FDFLAGS_APPEND) !== 0
-            ? file.node.content.byteLength
-            : file.position;
-        const total = iovViews.reduce((acc, b) => acc + b.byteLength, 0);
-        if (position + total > file.node.content.byteLength) {
-          const errno = resizeFile(file.node, position + total);
-          if (errno !== WASIAbi.WASI_ESUCCESS) return errno;
-        }
-        for (const buf of iovViews) {
-          file.node.content.set(buf, position);
-          position += buf.byteLength;
-        }
-        file.position = position;
-        file.node.mtim = nowNs();
-        view.setUint32(nwritten, total, true);
-        return WASIAbi.WASI_ESUCCESS;
-      },
-
-      fd_prestat_get: (fd: number, buf: number) => {
-        const file = getFile(fd);
-        if (!file || !file.isPreopen) return WASIAbi.WASI_ERRNO_BADF;
-        const view = memoryView();
-        view.setUint8(buf, 0); // preopentype::dir
-        view.setUint32(buf + 4, abi.byteLength(file.preopenPath || ""), true);
-        return WASIAbi.WASI_ESUCCESS;
-      },
-
-      fd_prestat_dir_name: (fd: number, pathPtr: number, pathLen: number) => {
-        const file = getFile(fd);
-        if (!file || !file.isPreopen) return WASIAbi.WASI_ERRNO_BADF;
-        const view = memoryView();
-        const name = file.preopenPath || "";
-        if (pathLen < abi.byteLength(name)) return WASIAbi.WASI_ERRNO_INVAL;
-        abi.writeString(view, name, pathPtr);
-        return WASIAbi.WASI_ESUCCESS;
-      },
-
-      path_create_directory: (fd: number, pathPtr: number, pathLen: number) => {
-        const resolved = resolveAt(fd, pathPtr, pathLen, false);
-        if (resolved.errno !== undefined) return resolved.errno;
-        if (resolved.node) return WASIAbi.WASI_ERRNO_EXIST;
-        if (!resolved.parent || !resolved.name) {
-          return WASIAbi.WASI_ERRNO_NOENT;
-        }
-        resolved.parent.entries[resolved.name] = makeDir();
-        return WASIAbi.WASI_ESUCCESS;
-      },
-
-      path_filestat_get: (
-        fd: number,
-        flags: number,
-        pathPtr: number,
-        pathLen: number,
-        buf: number,
-      ) => {
-        const follow = (flags & WASIAbi.WASI_LOOKUPFLAGS_SYMLINK_FOLLOW) !== 0;
-        const resolved = resolveAt(fd, pathPtr, pathLen, follow);
-        if (resolved.errno !== undefined) return resolved.errno;
-        if (!resolved.node) return WASIAbi.WASI_ERRNO_NOENT;
-        const view = memoryView();
-        abi.writeFilestat(
-          view,
-          buf,
-          filetypeOf(resolved.node),
-          statOf(resolved.node),
-        );
-        return WASIAbi.WASI_ESUCCESS;
-      },
-
-      path_filestat_set_times: (
-        fd: number,
-        flags: number,
-        pathPtr: number,
-        pathLen: number,
-        atim: bigint,
-        mtim: bigint,
-        fstflags: number,
-      ) => {
-        if (!validateFstflags(fstflags)) return WASIAbi.WASI_ERRNO_INVAL;
-        const follow = (flags & WASIAbi.WASI_LOOKUPFLAGS_SYMLINK_FOLLOW) !== 0;
-        const resolved = resolveAt(fd, pathPtr, pathLen, follow);
-        if (resolved.errno !== undefined) return resolved.errno;
-        if (!resolved.node) return WASIAbi.WASI_ERRNO_NOENT;
-        applyTimes(resolved.node, atim, mtim, fstflags);
-        return WASIAbi.WASI_ESUCCESS;
-      },
-
-      path_link: (
-        oldFd: number,
-        oldFlags: number,
-        oldPathPtr: number,
-        oldPathLen: number,
-        newFd: number,
-        newPathPtr: number,
-        newPathLen: number,
-      ) => {
-        // Following the source symlink for a hard link is not supported.
-        if ((oldFlags & WASIAbi.WASI_LOOKUPFLAGS_SYMLINK_FOLLOW) !== 0) {
-          return WASIAbi.WASI_ERRNO_INVAL;
-        }
-        const source = resolveAt(oldFd, oldPathPtr, oldPathLen, false);
-        if (source.errno !== undefined) return source.errno;
-        if (!source.node) return WASIAbi.WASI_ERRNO_NOENT;
-        if (source.node.type === "dir") return WASIAbi.WASI_ERRNO_PERM;
-        const target = resolveAt(newFd, newPathPtr, newPathLen, false);
-        if (target.errno !== undefined) return target.errno;
-        if (target.trailingSlash) return WASIAbi.WASI_ERRNO_NOENT;
-        if (target.node) return WASIAbi.WASI_ERRNO_EXIST;
-        if (!target.parent || !target.name) return WASIAbi.WASI_ERRNO_NOENT;
-        target.parent.entries[target.name] = source.node;
-        if (source.node.type === "file") source.node.nlink++;
-        return WASIAbi.WASI_ESUCCESS;
-      },
-
-      path_open: (
-        dirfd: number,
-        dirflags: number,
-        pathPtr: number,
-        pathLen: number,
-        oflags: number,
-        fsRightsBase: bigint,
-        fsRightsInheriting: bigint,
-        fdflags: number,
-        openedFdPtr: number,
-      ) => {
-        const follow =
-          (dirflags & WASIAbi.WASI_LOOKUPFLAGS_SYMLINK_FOLLOW) !== 0;
-        const resolved = resolveAt(dirfd, pathPtr, pathLen, follow);
-        if (resolved.errno !== undefined) return resolved.errno;
-        const dir = resolved.dir;
-        // Requested rights must not exceed what the directory can bequeath.
-        if (
-          ((fsRightsBase | fsRightsInheriting) &
-            (ALL_RIGHTS ^ dir.rightsInheriting)) !==
-          BIG_ZERO
-        ) {
-          return WASIAbi.WASI_ERRNO_NOTCAPABLE;
-        }
-
-        let node = resolved.node;
-        if (node) {
-          if (node.type === "symlink") {
-            // An unfollowed final symlink cannot be opened.
-            return WASIAbi.WASI_ERRNO_LOOP;
-          }
-          if ((oflags & WASIAbi.WASI_OFLAGS_EXCL) !== 0) {
-            return WASIAbi.WASI_ERRNO_EXIST;
-          }
-          if (node.type !== "dir") {
-            if (resolved.trailingSlash) return WASIAbi.WASI_ERRNO_NOTDIR;
-            if ((oflags & WASIAbi.WASI_OFLAGS_DIRECTORY) !== 0) {
-              return WASIAbi.WASI_ERRNO_NOTDIR;
-            }
-          }
-          if (
-            node.type === "dir" &&
-            (fsRightsBase & RIGHTS.FD_WRITE) !== BIG_ZERO
-          ) {
-            return WASIAbi.WASI_ERRNO_ISDIR;
-          }
-          if ((oflags & WASIAbi.WASI_OFLAGS_TRUNC) !== 0) {
-            if (node.type !== "file") return WASIAbi.WASI_ERRNO_ISDIR;
-            if ((dir.rightsBase & RIGHTS.PATH_FILESTAT_SET_SIZE) === BIG_ZERO) {
-              return WASIAbi.WASI_ERRNO_NOTCAPABLE;
-            }
-            const errno = resizeFile(node, 0);
-            if (errno !== WASIAbi.WASI_ESUCCESS) return errno;
-          }
+      if (file.node.type === "character") {
+        if (file.node.kind === "stdio") {
+          const bytesRead = file.node.entry.readv(iovViews);
+          view.setUint32(nread, bytesRead, true);
         } else {
-          if ((oflags & WASIAbi.WASI_OFLAGS_CREAT) === 0) {
-            return WASIAbi.WASI_ERRNO_NOENT;
-          }
-          if (resolved.trailingSlash) return WASIAbi.WASI_ERRNO_NOENT;
-          if (!resolved.parent || !resolved.name) {
-            return WASIAbi.WASI_ERRNO_NOENT;
-          }
-          const created = makeFile(new Uint8Array(0));
-          resolved.parent.entries[resolved.name] = created;
-          node = created;
+          view.setUint32(nread, 0, true);
         }
+        return WASIAbi.WASI_ESUCCESS;
+      }
+      if (file.node.type !== "file") return WASIAbi.WASI_ERRNO_INVAL;
+      if ((file.rightsBase & RIGHTS.FD_READ) === BIG_ZERO) {
+        return WASIAbi.WASI_ERRNO_NOTCAPABLE;
+      }
 
-        const typeMask = node.type === "dir" ? DIRECTORY_RIGHTS : FILE_RIGHTS;
-        files.set(nextFd, {
-          node,
-          position: 0,
-          fdflags,
-          rightsBase: fsRightsBase & typeMask,
-          rightsInheriting:
-            node.type === "dir"
-              ? fsRightsInheriting
-              : fsRightsInheriting & FILE_RIGHTS,
-          isPreopen: false,
+      let totalRead = 0;
+      for (const buf of iovViews) {
+        const count = backend.readAt(file.node, buf, file.position + totalRead);
+        totalRead += count;
+        if (count < buf.byteLength) break;
+      }
+      file.position += totalRead;
+      view.setUint32(nread, totalRead, true);
+      return WASIAbi.WASI_ESUCCESS;
+    },
+
+    fd_readdir: (
+      fd: number,
+      buf: number,
+      bufLen: number,
+      cookie: bigint,
+      bufusedPtr: number,
+    ) => {
+      const file = getFile(fd);
+      if (!file) return WASIAbi.WASI_ERRNO_BADF;
+      if (file.node.type !== "dir") return WASIAbi.WASI_ERRNO_NOTDIR;
+      const view = memoryView();
+      const dir = file.node;
+      const names = backend.listChildren(dir);
+      const entries: { name: string; ino: bigint; type: number }[] = [
+        {
+          name: ".",
+          ino: dir.ino,
+          type: WASIAbi.WASI_FILETYPE_DIRECTORY,
+        },
+        {
+          name: "..",
+          ino: dir.ino,
+          type: WASIAbi.WASI_FILETYPE_DIRECTORY,
+        },
+        ...names.map((name) => ({
+          name,
+          ino: dir.entries[name].ino,
+          type: filetypeOf(dir.entries[name]),
+        })),
+      ];
+      const bufferEnd = buf + bufLen;
+      let ptr = buf;
+      for (let i = Number(cookie); i < entries.length; i++) {
+        const written = abi.writeDirent(view, ptr, bufferEnd, {
+          nextCookie: BigInt(i + 1),
+          ino: entries[i].ino,
+          name: entries[i].name,
+          type: entries[i].type,
         });
-        const view = memoryView();
-        view.setUint32(openedFdPtr, nextFd, true);
-        nextFd++;
-        return WASIAbi.WASI_ESUCCESS;
-      },
+        ptr += written;
+        if (ptr >= bufferEnd) break;
+      }
+      view.setUint32(bufusedPtr, ptr - buf, true);
+      return WASIAbi.WASI_ESUCCESS;
+    },
 
-      path_readlink: (
-        fd: number,
-        pathPtr: number,
-        pathLen: number,
-        buf: number,
-        bufLen: number,
-        bufusedPtr: number,
-      ) => {
-        const resolved = resolveAt(fd, pathPtr, pathLen, false);
-        if (resolved.errno !== undefined) return resolved.errno;
-        if (!resolved.node) return WASIAbi.WASI_ERRNO_NOENT;
-        if (resolved.node.type !== "symlink") return WASIAbi.WASI_ERRNO_INVAL;
-        const view = memoryView();
-        const bytes = new TextEncoder().encode(resolved.node.target);
-        // Silently truncate to the buffer; no NUL terminator is written.
-        const count = Math.min(bytes.byteLength, bufLen);
-        new Uint8Array(view.buffer, buf, count).set(bytes.subarray(0, count));
-        view.setUint32(bufusedPtr, count, true);
-        return WASIAbi.WASI_ESUCCESS;
-      },
+    fd_renumber: (from: number, to: number) => {
+      const source = getFile(from);
+      if (!source) return WASIAbi.WASI_ERRNO_BADF;
+      if (from === to) return WASIAbi.WASI_ESUCCESS;
+      // The destination must be an already-open fd; renumber replaces it.
+      const target = getFile(to);
+      if (!target) return WASIAbi.WASI_ERRNO_BADF;
+      if (target.node.type === "character" && target.node.kind === "stdio") {
+        target.node.entry.close();
+      } else if (target.node.type === "file") {
+        backend.closeFile(target.node);
+      }
+      files.set(to, source);
+      files.delete(from);
+      return WASIAbi.WASI_ESUCCESS;
+    },
 
-      path_remove_directory: (fd: number, pathPtr: number, pathLen: number) => {
-        const resolved = resolveAt(fd, pathPtr, pathLen, false);
-        if (resolved.errno !== undefined) return resolved.errno;
-        if (!resolved.node) return WASIAbi.WASI_ERRNO_NOENT;
-        if (resolved.node.type !== "dir") return WASIAbi.WASI_ERRNO_NOTDIR;
-        if (!resolved.parent || !resolved.name) {
+    fd_seek: (
+      fd: number,
+      offset: bigint,
+      whence: number,
+      newOffsetPtr: number,
+    ) => {
+      const file = getFile(fd);
+      if (!file) return WASIAbi.WASI_ERRNO_BADF;
+      if (file.node.type === "dir") return WASIAbi.WASI_ERRNO_ISDIR;
+      if (file.node.type !== "file") return WASIAbi.WASI_ERRNO_SPIPE;
+      const delta = Number(offset);
+      let position: number;
+      switch (whence) {
+        case WASIAbi.WASI_WHENCE_SET:
+          position = delta;
+          break;
+        case WASIAbi.WASI_WHENCE_CUR:
+          position = file.position + delta;
+          break;
+        case WASIAbi.WASI_WHENCE_END:
+          position = backend.fileSize(file.node) + delta;
+          break;
+        default:
           return WASIAbi.WASI_ERRNO_INVAL;
-        }
-        if (Object.keys(resolved.node.entries).length > 0) {
-          return WASIAbi.WASI_ERRNO_NOTEMPTY;
-        }
-        delete resolved.parent.entries[resolved.name];
-        return WASIAbi.WASI_ESUCCESS;
-      },
+      }
+      if (position < 0) return WASIAbi.WASI_ERRNO_INVAL;
+      file.position = position;
+      const view = memoryView();
+      view.setBigUint64(newOffsetPtr, BigInt(position), true);
+      return WASIAbi.WASI_ESUCCESS;
+    },
 
-      path_rename: (
-        fd: number,
-        oldPathPtr: number,
-        oldPathLen: number,
-        newFd: number,
-        newPathPtr: number,
-        newPathLen: number,
-      ) => {
-        const source = resolveAt(fd, oldPathPtr, oldPathLen, false);
-        if (source.errno !== undefined) return source.errno;
-        if (!source.node) return WASIAbi.WASI_ERRNO_NOENT;
-        if (!source.parent || !source.name) return WASIAbi.WASI_ERRNO_INVAL;
-        if (source.trailingSlash && source.node.type !== "dir") {
-          return WASIAbi.WASI_ERRNO_NOTDIR;
-        }
-        const target = resolveAt(newFd, newPathPtr, newPathLen, false);
-        if (target.errno !== undefined) return target.errno;
-        if (!target.parent || !target.name) return WASIAbi.WASI_ERRNO_INVAL;
-        if (target.trailingSlash && source.node.type !== "dir") {
-          return WASIAbi.WASI_ERRNO_NOTDIR;
-        }
-        if (target.node) {
-          if (source.node.type === "dir") {
-            if (target.node.type !== "dir") return WASIAbi.WASI_ERRNO_NOTDIR;
-            if (Object.keys(target.node.entries).length > 0) {
-              return WASIAbi.WASI_ERRNO_NOTEMPTY;
-            }
-          } else {
-            if (target.node.type === "dir") return WASIAbi.WASI_ERRNO_ISDIR;
-            if (target.node.type === "file") target.node.nlink--;
-          }
-        }
-        delete source.parent.entries[source.name];
-        target.parent.entries[target.name] = source.node;
-        return WASIAbi.WASI_ESUCCESS;
-      },
+    fd_tell: (fd: number, offsetPtr: number) => {
+      const file = getFile(fd);
+      if (!file) return WASIAbi.WASI_ERRNO_BADF;
+      if (file.node.type === "dir") return WASIAbi.WASI_ERRNO_ISDIR;
+      if (file.node.type !== "file") return WASIAbi.WASI_ERRNO_SPIPE;
+      const view = memoryView();
+      view.setBigUint64(offsetPtr, BigInt(file.position), true);
+      return WASIAbi.WASI_ESUCCESS;
+    },
 
-      path_symlink: (
-        oldPathPtr: number,
-        oldPathLen: number,
-        fd: number,
-        newPathPtr: number,
-        newPathLen: number,
-      ) => {
-        const view = memoryView();
-        const targetPath = abi.readString(view, oldPathPtr, oldPathLen);
-        if (targetPath.indexOf("\0") !== -1) return WASIAbi.WASI_ERRNO_INVAL;
-        // Absolute symlink targets could escape the sandbox.
-        if (targetPath.startsWith("/")) return WASIAbi.WASI_ERRNO_PERM;
-        const resolved = resolveAt(fd, newPathPtr, newPathLen, false);
-        if (resolved.errno !== undefined) return resolved.errno;
-        if (resolved.node) {
-          if (resolved.node.type !== "dir" && resolved.trailingSlash) {
+    fd_write: (fd: number, iovs: number, iovsLen: number, nwritten: number) => {
+      const file = getFile(fd);
+      if (!file) return WASIAbi.WASI_ERRNO_BADF;
+      if (file.node.type === "dir") return WASIAbi.WASI_ERRNO_ISDIR;
+      const view = memoryView();
+      const iovViews = abi.iovViews(view, iovs, iovsLen);
+
+      if (file.node.type === "character") {
+        if (file.node.kind === "stdio") {
+          const bytesWritten = file.node.entry.writev(iovViews);
+          view.setUint32(nwritten, bytesWritten, true);
+        } else {
+          const total = iovViews.reduce((acc, b) => acc + b.byteLength, 0);
+          view.setUint32(nwritten, total, true);
+        }
+        return WASIAbi.WASI_ESUCCESS;
+      }
+      if (file.node.type !== "file") return WASIAbi.WASI_ERRNO_INVAL;
+      if ((file.rightsBase & RIGHTS.FD_WRITE) === BIG_ZERO) {
+        return WASIAbi.WASI_ERRNO_NOTCAPABLE;
+      }
+
+      let position =
+        (file.fdflags & WASIAbi.WASI_FDFLAGS_APPEND) !== 0
+          ? backend.fileSize(file.node)
+          : file.position;
+      const total = iovViews.reduce((acc, b) => acc + b.byteLength, 0);
+      if (position + total > backend.fileSize(file.node)) {
+        const errno = backend.resize(file.node, position + total);
+        if (errno !== WASIAbi.WASI_ESUCCESS) return errno;
+      }
+      for (const buf of iovViews) {
+        const errno = backend.writeAt(file.node, buf, position);
+        if (errno !== WASIAbi.WASI_ESUCCESS) return errno;
+        position += buf.byteLength;
+      }
+      file.position = position;
+      file.node.mtim = nowNs();
+      view.setUint32(nwritten, total, true);
+      return WASIAbi.WASI_ESUCCESS;
+    },
+
+    fd_prestat_get: (fd: number, buf: number) => {
+      const file = getFile(fd);
+      if (!file || !file.isPreopen) return WASIAbi.WASI_ERRNO_BADF;
+      const view = memoryView();
+      view.setUint8(buf, 0); // preopentype::dir
+      view.setUint32(buf + 4, abi.byteLength(file.preopenPath || ""), true);
+      return WASIAbi.WASI_ESUCCESS;
+    },
+
+    fd_prestat_dir_name: (fd: number, pathPtr: number, pathLen: number) => {
+      const file = getFile(fd);
+      if (!file || !file.isPreopen) return WASIAbi.WASI_ERRNO_BADF;
+      const view = memoryView();
+      const name = file.preopenPath || "";
+      if (pathLen < abi.byteLength(name)) return WASIAbi.WASI_ERRNO_INVAL;
+      abi.writeString(view, name, pathPtr);
+      return WASIAbi.WASI_ESUCCESS;
+    },
+
+    path_create_directory: (fd: number, pathPtr: number, pathLen: number) => {
+      const resolved = resolveAt(fd, pathPtr, pathLen, false);
+      if (resolved.errno !== undefined) return resolved.errno;
+      if (resolved.node) return WASIAbi.WASI_ERRNO_EXIST;
+      if (!resolved.parent || !resolved.name) {
+        return WASIAbi.WASI_ERRNO_NOENT;
+      }
+      return backend.createChild(resolved.parent, resolved.name, makeDir());
+    },
+
+    path_filestat_get: (
+      fd: number,
+      flags: number,
+      pathPtr: number,
+      pathLen: number,
+      buf: number,
+    ) => {
+      const follow = (flags & WASIAbi.WASI_LOOKUPFLAGS_SYMLINK_FOLLOW) !== 0;
+      const resolved = resolveAt(fd, pathPtr, pathLen, follow);
+      if (resolved.errno !== undefined) return resolved.errno;
+      if (!resolved.node) return WASIAbi.WASI_ERRNO_NOENT;
+      const view = memoryView();
+      abi.writeFilestat(
+        view,
+        buf,
+        filetypeOf(resolved.node),
+        statOf(backend, resolved.node),
+      );
+      return WASIAbi.WASI_ESUCCESS;
+    },
+
+    path_filestat_set_times: (
+      fd: number,
+      flags: number,
+      pathPtr: number,
+      pathLen: number,
+      atim: bigint,
+      mtim: bigint,
+      fstflags: number,
+    ) => {
+      if (!validateFstflags(fstflags)) return WASIAbi.WASI_ERRNO_INVAL;
+      const follow = (flags & WASIAbi.WASI_LOOKUPFLAGS_SYMLINK_FOLLOW) !== 0;
+      const resolved = resolveAt(fd, pathPtr, pathLen, follow);
+      if (resolved.errno !== undefined) return resolved.errno;
+      if (!resolved.node) return WASIAbi.WASI_ERRNO_NOENT;
+      applyTimes(resolved.node, atim, mtim, fstflags);
+      return WASIAbi.WASI_ESUCCESS;
+    },
+
+    path_link: (
+      oldFd: number,
+      oldFlags: number,
+      oldPathPtr: number,
+      oldPathLen: number,
+      newFd: number,
+      newPathPtr: number,
+      newPathLen: number,
+    ) => {
+      // Following the source symlink for a hard link is not supported.
+      if ((oldFlags & WASIAbi.WASI_LOOKUPFLAGS_SYMLINK_FOLLOW) !== 0) {
+        return WASIAbi.WASI_ERRNO_INVAL;
+      }
+      const source = resolveAt(oldFd, oldPathPtr, oldPathLen, false);
+      if (source.errno !== undefined) return source.errno;
+      if (!source.node) return WASIAbi.WASI_ERRNO_NOENT;
+      if (source.node.type === "dir") return WASIAbi.WASI_ERRNO_PERM;
+      const target = resolveAt(newFd, newPathPtr, newPathLen, false);
+      if (target.errno !== undefined) return target.errno;
+      if (target.trailingSlash) return WASIAbi.WASI_ERRNO_NOENT;
+      if (target.node) return WASIAbi.WASI_ERRNO_EXIST;
+      if (!target.parent || !target.name) return WASIAbi.WASI_ERRNO_NOENT;
+      const errno = backend.createChild(
+        target.parent,
+        target.name,
+        source.node,
+      );
+      if (errno !== WASIAbi.WASI_ESUCCESS) return errno;
+      if (source.node.type === "file") source.node.nlink++;
+      return WASIAbi.WASI_ESUCCESS;
+    },
+
+    path_open: (
+      dirfd: number,
+      dirflags: number,
+      pathPtr: number,
+      pathLen: number,
+      oflags: number,
+      fsRightsBase: bigint,
+      fsRightsInheriting: bigint,
+      fdflags: number,
+      openedFdPtr: number,
+    ) => {
+      const follow = (dirflags & WASIAbi.WASI_LOOKUPFLAGS_SYMLINK_FOLLOW) !== 0;
+      const resolved = resolveAt(dirfd, pathPtr, pathLen, follow);
+      if (resolved.errno !== undefined) return resolved.errno;
+      const dir = resolved.dir;
+      // Requested rights must not exceed what the directory can bequeath.
+      if (
+        ((fsRightsBase | fsRightsInheriting) &
+          (ALL_RIGHTS ^ dir.rightsInheriting)) !==
+        BIG_ZERO
+      ) {
+        return WASIAbi.WASI_ERRNO_NOTCAPABLE;
+      }
+
+      let node = resolved.node;
+      if (node) {
+        if (node.type === "symlink") {
+          // An unfollowed final symlink cannot be opened.
+          return WASIAbi.WASI_ERRNO_LOOP;
+        }
+        if ((oflags & WASIAbi.WASI_OFLAGS_EXCL) !== 0) {
+          return WASIAbi.WASI_ERRNO_EXIST;
+        }
+        if (node.type !== "dir") {
+          if (resolved.trailingSlash) return WASIAbi.WASI_ERRNO_NOTDIR;
+          if ((oflags & WASIAbi.WASI_OFLAGS_DIRECTORY) !== 0) {
             return WASIAbi.WASI_ERRNO_NOTDIR;
           }
-          return WASIAbi.WASI_ERRNO_EXIST;
+        }
+        if (
+          node.type === "dir" &&
+          (fsRightsBase & RIGHTS.FD_WRITE) !== BIG_ZERO
+        ) {
+          return WASIAbi.WASI_ERRNO_ISDIR;
+        }
+        if ((oflags & WASIAbi.WASI_OFLAGS_TRUNC) !== 0) {
+          if (node.type !== "file") return WASIAbi.WASI_ERRNO_ISDIR;
+          if ((dir.rightsBase & RIGHTS.PATH_FILESTAT_SET_SIZE) === BIG_ZERO) {
+            return WASIAbi.WASI_ERRNO_NOTCAPABLE;
+          }
+          const errno = backend.resize(node, 0);
+          if (errno !== WASIAbi.WASI_ESUCCESS) return errno;
+        }
+      } else {
+        if ((oflags & WASIAbi.WASI_OFLAGS_CREAT) === 0) {
+          return WASIAbi.WASI_ERRNO_NOENT;
         }
         if (resolved.trailingSlash) return WASIAbi.WASI_ERRNO_NOENT;
         if (!resolved.parent || !resolved.name) {
           return WASIAbi.WASI_ERRNO_NOENT;
         }
-        resolved.parent.entries[resolved.name] = makeSymlink(targetPath);
-        return WASIAbi.WASI_ESUCCESS;
-      },
+        const created = makeFile(new Uint8Array(0));
+        const errno = backend.createChild(
+          resolved.parent,
+          resolved.name,
+          created,
+        );
+        if (errno !== WASIAbi.WASI_ESUCCESS) return errno;
+        node = created;
+      }
 
-      path_unlink_file: (fd: number, pathPtr: number, pathLen: number) => {
-        const resolved = resolveAt(fd, pathPtr, pathLen, false);
-        if (resolved.errno !== undefined) return resolved.errno;
-        if (!resolved.node) return WASIAbi.WASI_ERRNO_NOENT;
-        if (resolved.node.type === "dir") return WASIAbi.WASI_ERRNO_ISDIR;
-        if (resolved.trailingSlash) return WASIAbi.WASI_ERRNO_NOTDIR;
-        if (!resolved.parent || !resolved.name) {
-          return WASIAbi.WASI_ERRNO_INVAL;
+      if (node.type === "file") {
+        const errno = backend.openFile(node);
+        if (errno !== WASIAbi.WASI_ESUCCESS) return errno;
+      }
+      const typeMask = node.type === "dir" ? DIRECTORY_RIGHTS : FILE_RIGHTS;
+      files.set(nextFd, {
+        node,
+        position: 0,
+        fdflags,
+        rightsBase: fsRightsBase & typeMask,
+        rightsInheriting:
+          node.type === "dir"
+            ? fsRightsInheriting
+            : fsRightsInheriting & FILE_RIGHTS,
+        isPreopen: false,
+      });
+      const view = memoryView();
+      view.setUint32(openedFdPtr, nextFd, true);
+      nextFd++;
+      return WASIAbi.WASI_ESUCCESS;
+    },
+
+    path_readlink: (
+      fd: number,
+      pathPtr: number,
+      pathLen: number,
+      buf: number,
+      bufLen: number,
+      bufusedPtr: number,
+    ) => {
+      const resolved = resolveAt(fd, pathPtr, pathLen, false);
+      if (resolved.errno !== undefined) return resolved.errno;
+      if (!resolved.node) return WASIAbi.WASI_ERRNO_NOENT;
+      if (resolved.node.type !== "symlink") return WASIAbi.WASI_ERRNO_INVAL;
+      const view = memoryView();
+      const bytes = new TextEncoder().encode(resolved.node.target);
+      // Silently truncate to the buffer; no NUL terminator is written.
+      const count = Math.min(bytes.byteLength, bufLen);
+      new Uint8Array(view.buffer, buf, count).set(bytes.subarray(0, count));
+      view.setUint32(bufusedPtr, count, true);
+      return WASIAbi.WASI_ESUCCESS;
+    },
+
+    path_remove_directory: (fd: number, pathPtr: number, pathLen: number) => {
+      const resolved = resolveAt(fd, pathPtr, pathLen, false);
+      if (resolved.errno !== undefined) return resolved.errno;
+      if (!resolved.node) return WASIAbi.WASI_ERRNO_NOENT;
+      if (resolved.node.type !== "dir") return WASIAbi.WASI_ERRNO_NOTDIR;
+      if (!resolved.parent || !resolved.name) {
+        return WASIAbi.WASI_ERRNO_INVAL;
+      }
+      if (Object.keys(resolved.node.entries).length > 0) {
+        return WASIAbi.WASI_ERRNO_NOTEMPTY;
+      }
+      return backend.removeChild(resolved.parent, resolved.name);
+    },
+
+    path_rename: (
+      fd: number,
+      oldPathPtr: number,
+      oldPathLen: number,
+      newFd: number,
+      newPathPtr: number,
+      newPathLen: number,
+    ) => {
+      const source = resolveAt(fd, oldPathPtr, oldPathLen, false);
+      if (source.errno !== undefined) return source.errno;
+      if (!source.node) return WASIAbi.WASI_ERRNO_NOENT;
+      if (!source.parent || !source.name) return WASIAbi.WASI_ERRNO_INVAL;
+      if (source.trailingSlash && source.node.type !== "dir") {
+        return WASIAbi.WASI_ERRNO_NOTDIR;
+      }
+      const target = resolveAt(newFd, newPathPtr, newPathLen, false);
+      if (target.errno !== undefined) return target.errno;
+      if (!target.parent || !target.name) return WASIAbi.WASI_ERRNO_INVAL;
+      if (target.trailingSlash && source.node.type !== "dir") {
+        return WASIAbi.WASI_ERRNO_NOTDIR;
+      }
+      if (target.node) {
+        if (source.node.type === "dir") {
+          if (target.node.type !== "dir") return WASIAbi.WASI_ERRNO_NOTDIR;
+          if (Object.keys(target.node.entries).length > 0) {
+            return WASIAbi.WASI_ERRNO_NOTEMPTY;
+          }
+        } else {
+          if (target.node.type === "dir") return WASIAbi.WASI_ERRNO_ISDIR;
+          if (target.node.type === "file") target.node.nlink--;
         }
-        if (resolved.node.type === "file") resolved.node.nlink--;
-        delete resolved.parent.entries[resolved.name];
-        return WASIAbi.WASI_ESUCCESS;
-      },
+      }
+      return backend.renameChild(
+        source.parent,
+        source.name,
+        target.parent,
+        target.name,
+      );
+    },
 
-      sock_shutdown: (fd: number, _how: number) => {
-        const file = getFile(fd);
-        if (!file) return WASIAbi.WASI_ERRNO_BADF;
-        // Nothing in this file system is a socket.
-        return WASIAbi.WASI_ERRNO_NOTSOCK;
-      },
-    };
+    path_symlink: (
+      oldPathPtr: number,
+      oldPathLen: number,
+      fd: number,
+      newPathPtr: number,
+      newPathLen: number,
+    ) => {
+      const view = memoryView();
+      const targetPath = abi.readString(view, oldPathPtr, oldPathLen);
+      if (targetPath.indexOf("\0") !== -1) return WASIAbi.WASI_ERRNO_INVAL;
+      // Absolute symlink targets could escape the sandbox.
+      if (targetPath.startsWith("/")) return WASIAbi.WASI_ERRNO_PERM;
+      const resolved = resolveAt(fd, newPathPtr, newPathLen, false);
+      if (resolved.errno !== undefined) return resolved.errno;
+      if (resolved.node) {
+        if (resolved.node.type !== "dir" && resolved.trailingSlash) {
+          return WASIAbi.WASI_ERRNO_NOTDIR;
+        }
+        return WASIAbi.WASI_ERRNO_EXIST;
+      }
+      if (resolved.trailingSlash) return WASIAbi.WASI_ERRNO_NOENT;
+      if (!resolved.parent || !resolved.name) {
+        return WASIAbi.WASI_ERRNO_NOENT;
+      }
+      return backend.createChild(
+        resolved.parent,
+        resolved.name,
+        makeSymlink(targetPath),
+      );
+    },
+
+    path_unlink_file: (fd: number, pathPtr: number, pathLen: number) => {
+      const resolved = resolveAt(fd, pathPtr, pathLen, false);
+      if (resolved.errno !== undefined) return resolved.errno;
+      if (!resolved.node) return WASIAbi.WASI_ERRNO_NOENT;
+      if (resolved.node.type === "dir") return WASIAbi.WASI_ERRNO_ISDIR;
+      if (resolved.trailingSlash) return WASIAbi.WASI_ERRNO_NOTDIR;
+      if (!resolved.parent || !resolved.name) {
+        return WASIAbi.WASI_ERRNO_INVAL;
+      }
+      if (resolved.node.type === "file") resolved.node.nlink--;
+      return backend.removeChild(resolved.parent, resolved.name);
+    },
+
+    sock_shutdown: (fd: number, _how: number) => {
+      const file = getFile(fd);
+      if (!file) return WASIAbi.WASI_ERRNO_BADF;
+      // Nothing in this file system is a socket.
+      return WASIAbi.WASI_ERRNO_NOTSOCK;
+    },
   };
 }
 
