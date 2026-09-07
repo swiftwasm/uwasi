@@ -260,3 +260,11 @@ Host-side APIs beyond the preview1 surface (`usePoll`'s `sleep`/
 invisible to guests. They intentionally mirror preview2 shapes — a
 `WASIFdReadiness` is a `pollable`, a `SharedInputChannel` is an
 `input-stream` producer — so a future preview2 host layer can reuse them.
+
+## Releasing
+
+Run **Actions > Release > Run workflow** from `main` with a new stable version,
+such as `1.5.0` (no `v` prefix). CI updates and tests both manifests, commits the
+version bump, pushes the commit and tag, then publishes to npm.
+Existing tags are rejected. If publishing fails after the tag is pushed,
+publish from that tag separately rather than rerunning release creation.
