@@ -2,7 +2,20 @@
 import fs from "fs/promises";
 import fsSync from "fs";
 import path from "path";
-import { useAll, WASI, MemoryFileSystem, useRandom } from "../lib/esm/index.js";
+import {
+  useAll,
+  WASI,
+  MemoryFileSystem,
+  useRandom,
+  useEnviron,
+  useArgs,
+  useClock,
+  usePoll,
+  useProc,
+  useOPFS,
+  OPFSBackend,
+} from "../lib/esm/index.js";
+import { MockOPFS } from "./opfs_mock.mjs";
 import { describe, it } from "node:test";
 import assert from "node:assert";
 import * as crypto from "crypto";
@@ -63,8 +76,13 @@ function findTestCases(testDir) {
   return allTests;
 }
 
-// Helper function to run a test
-async function runTest(testCase) {
+/**
+ * Run a test case against one of the filesystem backends.
+ *
+ * @param {TestCase} testCase
+ * @param {"memory" | "opfs"} backendKind
+ */
+async function runTest(testCase, backendKind) {
   /** @type {string[]} */
   const args = [];
   /** @type {Record<string, string>} */
@@ -82,54 +100,67 @@ async function runTest(testCase) {
     }
   }
 
-  // Setup file system
-  const fileSystem = new MemoryFileSystem(
-    (testCase.config.dirs || []).reduce((obj, dir) => {
-      obj[dir] = dir;
-      return obj;
-    }, {}),
-  );
-
-  // Clone directories to memory file system
-  if (testCase.config.dirs) {
-    for (const dir of testCase.config.dirs) {
-      const dirPath = path.join(path.dirname(testCase.wasmFile), dir);
-      await cloneDirectoryToMemFS(fileSystem, dirPath, "/" + dir);
-    }
-  }
+  const preopens = (testCase.config.dirs || []).reduce((obj, dir) => {
+    obj[dir] = dir;
+    return obj;
+  }, {});
 
   // Create stdout and stderr buffers
   let stdoutData = "";
   let stderrData = "";
+  const withStdio = {
+    stdout: (data) => {
+      if (typeof data === "string") {
+        stdoutData += data;
+      } else {
+        stdoutData += new TextDecoder().decode(data);
+      }
+    },
+    stderr: (data) => {
+      if (typeof data === "string") {
+        stderrData += data;
+      } else {
+        stderrData += new TextDecoder().decode(data);
+      }
+    },
+  };
+
+  /** @type {import("../lib/esm/options.js").WASIFeatureProvider[]} */
+  let features;
+  let cleanup = async () => {};
+  if (backendKind === "memory") {
+    const fileSystem = new MemoryFileSystem(preopens);
+    await cloneDirectories(fileSystem, testCase);
+    features = [
+      useAll({ withFileSystem: fileSystem, withStdio }),
+      useRandom({ randomFillSync: crypto.randomFillSync }),
+    ];
+  } else {
+    // The OPFS backend over a mock store: same syscall surface, but every
+    // namespace change round-trips through the durable namespace record.
+    const store = new MockOPFS();
+    const backend = await OPFSBackend.create(store.root, { preopens });
+    await cloneDirectories(backend.fileSystem, testCase);
+    // Seeded files are persisted up front so the spare pool stays free
+    // for the files the guest creates.
+    await backend.persistAll();
+    features = [
+      useOPFS({ withBackend: backend, withStdio }),
+      useEnviron(),
+      useArgs(),
+      useClock(),
+      usePoll({}),
+      useProc(),
+      useRandom({ randomFillSync: crypto.randomFillSync }),
+    ];
+    cleanup = () => backend.close();
+  }
 
   // Create WASI instance
   const wasi = new WASI({
     args: [path.basename(testCase.wasmFile), ...args],
     env: env,
-    features: [
-      useAll({
-        withFileSystem: fileSystem,
-        withStdio: {
-          stdout: (data) => {
-            if (typeof data === "string") {
-              stdoutData += data;
-            } else {
-              stdoutData += new TextDecoder().decode(data);
-            }
-          },
-          stderr: (data) => {
-            if (typeof data === "string") {
-              stderrData += data;
-            } else {
-              stderrData += new TextDecoder().decode(data);
-            }
-          },
-        },
-      }),
-      useRandom({
-        randomFillSync: crypto.randomFillSync,
-      }),
-    ],
+    features,
   });
 
   try {
@@ -153,6 +184,22 @@ async function runTest(testCase) {
       stdout: stdoutData,
       stderr: stderrData,
     };
+  } finally {
+    await cleanup();
+  }
+}
+
+/**
+ * Clone the test case's configured directories into a file system.
+ *
+ * @param {MemoryFileSystem} fileSystem
+ * @param {TestCase} testCase
+ */
+async function cloneDirectories(fileSystem, testCase) {
+  if (!testCase.config.dirs) return;
+  for (const dir of testCase.config.dirs) {
+    const dirPath = path.join(path.dirname(testCase.wasmFile), dir);
+    await cloneDirectoryToMemFS(fileSystem, dirPath, "/" + dir);
   }
 }
 
@@ -193,34 +240,75 @@ async function cloneDirectoryToMemFS(fileSystem, sourceDir, targetPath) {
   }
 }
 
-// Main test setup
-describe("WASI Test Suite", () => {
-  const __dirname = path.dirname(new URL(import.meta.url).pathname);
-  const testDir = path.join(__dirname, "../third_party/wasi-testsuite/tests");
-  const testCases = findTestCases(testDir);
-  // Load the skip tests list
-  let skipTests = {};
-  try {
-    skipTests = JSON.parse(
-      fsSync.readFileSync(path.join(__dirname, "./wasi.skip.json"), "utf8"),
-    );
-  } catch (err) {
-    console.warn("Could not load skip tests file. All tests will be run.");
-  }
+/**
+ * Cases that fail on OPFS for a documented, principled reason. The runner
+ * asserts they DO fail, so this list cannot silently go stale.
+ *
+ * @type {Record<string, Record<string, string>>}
+ */
+const opfsExpectedFailures = {
+  "WASI Rust tests": {
+    path_link: {
+      reason:
+        "hard links return NOTSUP on OPFS: the durable namespace record " +
+        "maps each data file to exactly one name",
+      // Pin the failure to the first path_link call so an unrelated
+      // breakage in the same case cannot masquerade as the known one.
+      stderrIncludes:
+        'creating a link in the same directory: Errno { code: 58, name: "NOTSUP"',
+    },
+  },
+};
 
-  // This test will dynamically create and run tests for each test case
-  for (const testCase of testCases) {
-    const isSkipped =
-      skipTests[testCase.suite] && skipTests[testCase.suite][testCase.testName];
-    const defineTest = isSkipped ? it.skip : it;
-    defineTest(`${testCase.suite} - ${testCase.testName}`, async () => {
-      const result = await runTest(testCase);
-      assert.strictEqual(result.error, undefined, result.stderr);
-      assert.strictEqual(
-        result.exitCode,
-        testCase.config.exit_code || 0,
-        result.stderr,
-      );
-    });
-  }
-});
+// Main test setup
+const __dirname = path.dirname(new URL(import.meta.url).pathname);
+const testDir = path.join(__dirname, "../third_party/wasi-testsuite/tests");
+const testCases = findTestCases(testDir);
+// Load the skip tests list
+let skipTests = {};
+try {
+  skipTests = JSON.parse(
+    fsSync.readFileSync(path.join(__dirname, "./wasi.skip.json"), "utf8"),
+  );
+} catch (err) {
+  console.warn("Could not load skip tests file. All tests will be run.");
+}
+
+for (const backendKind of ["memory", "opfs"]) {
+  describe(`WASI Test Suite (${backendKind})`, () => {
+    // This test will dynamically create and run tests for each test case
+    for (const testCase of testCases) {
+      const isSkipped =
+        skipTests[testCase.suite] &&
+        skipTests[testCase.suite][testCase.testName];
+      const defineTest = isSkipped ? it.skip : it;
+      const expectedFailure =
+        backendKind === "opfs"
+          ? opfsExpectedFailures[testCase.suite]?.[testCase.testName]
+          : undefined;
+      defineTest(`${testCase.suite} - ${testCase.testName}`, async () => {
+        const result = await runTest(testCase, backendKind);
+        if (expectedFailure !== undefined) {
+          assert.notStrictEqual(
+            result.exitCode,
+            testCase.config.exit_code || 0,
+            `expected a failure (${expectedFailure.reason}) but the case ` +
+              "passed; remove it from opfsExpectedFailures",
+          );
+          assert.ok(
+            result.stderr.includes(expectedFailure.stderrIncludes),
+            `the case failed, but not for the documented reason ` +
+              `(${expectedFailure.reason}); stderr: ${result.stderr}`,
+          );
+          return;
+        }
+        assert.strictEqual(result.error, undefined, result.stderr);
+        assert.strictEqual(
+          result.exitCode,
+          testCase.config.exit_code || 0,
+          result.stderr,
+        );
+      });
+    }
+  });
+}

@@ -13,6 +13,7 @@ export {
   MemoryFileSystem,
   lineBuffered,
 } from "./features/fd.js";
+export * from "./features/opfs.js";
 export * from "./features/poll.js";
 export * from "./features/proc.js";
 export { SharedInputChannel } from "./input_channel.js";
