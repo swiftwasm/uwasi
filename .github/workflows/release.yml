@@ -1,21 +1,44 @@
 name: Release
 
 on:
-  release:
-    types: [published]
   workflow_dispatch:
+    inputs:
+      version:
+        description: Stable version to release (e.g. 1.5.0, without a v prefix)
+        required: true
+        type: string
+
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 jobs:
   publish:
     name: Publish to npm
     runs-on: ubuntu-latest
+    env:
+      RELEASE_VERSION: ${{ inputs.version }}
     permissions:
-      contents: read
+      contents: write
       # Required for npm OIDC trusted publishing
       id-token: write
     steps:
+      - name: Validate release request
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" != refs/heads/main ]]; then
+            printf 'Release must be run from main.\n' >&2
+            exit 1
+          fi
+          if [[ ! "$RELEASE_VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            printf 'Expected a stable version such as 1.5.0 (no v prefix), got: %s\n' "$RELEASE_VERSION" >&2
+            exit 1
+          fi
+
       - uses: actions/checkout@v7
         with:
+          ref: main
+          fetch-depth: 0
           submodules: true
 
       - uses: actions/setup-node@v7
@@ -24,6 +47,25 @@ jobs:
           node-version: 24.20.0
           registry-url: https://registry.npmjs.org
 
+      - name: Prepare release source
+        shell: bash
+        run: |
+          if git show-ref --verify --quiet "refs/tags/$RELEASE_VERSION"; then
+            printf 'Release tag %s already exists.\n' "$RELEASE_VERSION" >&2
+            exit 1
+          fi
+          npm version "$RELEASE_VERSION" --no-git-tag-version
+
       - run: npm ci
       - run: npm test
+
+      - name: Commit and tag release
+        shell: bash
+        run: |
+          [[ "$(git branch --show-current)" == main ]]
+          git add package.json package-lock.json
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m "Release $RELEASE_VERSION"
+          git tag "$RELEASE_VERSION"
+          git push --atomic origin HEAD:refs/heads/main "refs/tags/$RELEASE_VERSION:refs/tags/$RELEASE_VERSION"
+
       - run: npm publish
