@@ -2,6 +2,7 @@ import {
   MemoryFileSystem,
   ReadableTextProxy,
   useMemoryFS,
+  useStdio,
   lineBuffered,
 } from "../lib/esm/features/fd.js";
 import { WASIAbi } from "../lib/esm/abi.js";
@@ -444,5 +445,119 @@ describe("fd.lineBuffered", () => {
       ]),
       ["\ufffdx", "\ufffd"],
     );
+  });
+});
+
+describe("fd extraFds", () => {
+  const EBADF = 8;
+
+  /** Build `feature`'s imports over a fresh memory. */
+  function makeImports(feature) {
+    const memory = new ArrayBuffer(65536);
+    const view = new DataView(memory);
+    const bytes = new Uint8Array(memory);
+    const imports = feature({}, new WASIAbi(), () => view);
+    return { imports, view, bytes };
+  }
+
+  function writeText({ imports, view, bytes }, fd, text) {
+    const data = new TextEncoder().encode(text);
+    bytes.set(data, DATA_PTR);
+    view.setUint32(IOVEC_PTR, DATA_PTR, true);
+    view.setUint32(IOVEC_PTR + 4, data.length, true);
+    return imports.fd_write(fd, IOVEC_PTR, 1, OUT_PTR);
+  }
+
+  function readText({ imports, view, bytes }, fd, length) {
+    view.setUint32(IOVEC_PTR, DATA_PTR, true);
+    view.setUint32(IOVEC_PTR + 4, length, true);
+    const ret = imports.fd_read(fd, IOVEC_PTR, 1, OUT_PTR);
+    assert.strictEqual(ret, ESUCCESS, `fd_read errno ${ret}`);
+    const nread = view.getUint32(OUT_PTR, true);
+    return new TextDecoder().decode(bytes.slice(DATA_PTR, DATA_PTR + nread));
+  }
+
+  it("useStdio routes writes and reads to the extra fds", () => {
+    const written = [];
+    const inputs = ["input"];
+    const h = makeImports(
+      useStdio({
+        extraFds: {
+          3: { write: (lines) => written.push(lines) },
+          4: { read: () => inputs.shift() || "" },
+        },
+      }),
+    );
+    assert.strictEqual(writeText(h, 3, "report"), ESUCCESS);
+    assert.deepStrictEqual(written, ["report"]);
+    assert.strictEqual(readText(h, 4, 16), "input");
+    assert.strictEqual(writeText(h, 5, "nobody"), EBADF);
+  });
+
+  it("applies outputBuffers to extra fds", () => {
+    const written = [];
+    const h = makeImports(
+      useStdio({
+        outputBuffers: true,
+        extraFds: { 3: { write: (buf) => written.push(buf) } },
+      }),
+    );
+    writeText(h, 3, "hi");
+    assert.deepStrictEqual(written, [new TextEncoder().encode("hi")]);
+  });
+
+  it("rejects fds that are stdio or not valid fd numbers", () => {
+    for (const fd of ["0", "2", "-1", "3.5", "x"]) {
+      assert.throws(
+        () => makeImports(useStdio({ extraFds: { [fd]: { read: () => "" } } })),
+        RangeError,
+        `fd ${fd}`,
+      );
+    }
+  });
+
+  it("useMemoryFS keeps preopens contiguous from fd 3", () => {
+    const written = [];
+    const h = makeImports(
+      useMemoryFS({
+        withFileSystem: new MemoryFileSystem({ "/": "/" }),
+        withStdio: { extraFds: { 4: { write: (l) => written.push(l) } } },
+      }),
+    );
+    assert.strictEqual(h.imports.fd_prestat_get(PREOPEN_FD, OUT_PTR), ESUCCESS);
+    assert.strictEqual(h.imports.fd_prestat_get(4, OUT_PTR), EBADF);
+    assert.strictEqual(writeText(h, 4, "report"), ESUCCESS);
+    assert.deepStrictEqual(written, ["report"]);
+  });
+
+  it("useMemoryFS rejects an extra fd a preopen needs", () => {
+    assert.throws(
+      () =>
+        makeImports(
+          useMemoryFS({
+            withFileSystem: new MemoryFileSystem({ "/": "/" }),
+            withStdio: { extraFds: { 3: { read: () => "" } } },
+          }),
+        ),
+      RangeError,
+    );
+  });
+
+  it("path_open does not hand out an extra fd", () => {
+    const written = [];
+    const fs = new MemoryFileSystem({ "/": "/" });
+    const h = {
+      fs,
+      ...makeImports(
+        useMemoryFS({
+          withFileSystem: fs,
+          withStdio: { extraFds: { 4: { write: (l) => written.push(l) } } },
+        }),
+      ),
+    };
+    const fd = openFile(h, "a.txt");
+    assert.notStrictEqual(fd, 4);
+    writeText(h, 4, "report");
+    assert.deepStrictEqual(written, ["report"]);
   });
 });
