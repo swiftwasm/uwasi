@@ -113,6 +113,22 @@ const wasi = new WASI({
 });
 ```
 
+To give the guest more character devices than stdio, pass `extraFds`, keyed by fd number. Each entry has either a `read` handler (like `stdin`) or a `write` handler (like `stdout`). The guest can't discover these fds, so it has to be told which numbers to use.
+
+```js
+import { WASI, useStdio } from "uwasi";
+const wasi = new WASI({
+    features: [useStdio({
+        extraFds: {
+            3: { write: (lines) => report.push(lines) },
+            4: { read: () => "config\n" },
+        },
+    })],
+});
+```
+
+`useMemoryFS` accepts the same option through `withStdio`. There, the preopened directories take fd 3 upward, because wasi-libc stops looking for preopens at the first fd that isn't one. Extra fds must be numbered above them, e.g. from 4 with the default single `/` preopen; a clash throws a `RangeError`.
+
 ### With `poll_oneoff` and `sched_yield` enabled
 
 `usePoll` supplies the blocking primitives that libc sleep functions

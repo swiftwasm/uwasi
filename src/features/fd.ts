@@ -145,27 +145,51 @@ export function lineBuffered(
   return handler;
 }
 
+export type CharacterDeviceHandler =
+  | { read: () => string | Uint8Array }
+  | { write: (lines: string | Uint8Array) => void };
+
 export type StdioOptions = {
   stdin?: () => string | Uint8Array;
   stdout?: (lines: string | Uint8Array) => void;
   stderr?: (lines: string | Uint8Array) => void;
   outputBuffers?: boolean;
+  extraFds?: { [fd: number]: CharacterDeviceHandler };
 };
 
-function bindStdio(
-  useOptions: StdioOptions = {},
-): (ReadableTextProxy | WritableTextProxy)[] {
+function bindStdio(useOptions: StdioOptions = {}): Map<number, FdEntry> {
   const outputBuffers = useOptions.outputBuffers || false;
-  return [
-    new ReadableTextProxy(
-      useOptions.stdin ||
-        (() => {
-          return "";
-        }),
-    ),
-    new WritableTextProxy(useOptions.stdout || console.log, outputBuffers),
-    new WritableTextProxy(useOptions.stderr || console.error, outputBuffers),
-  ];
+  const fdTable = new Map<number, FdEntry>([
+    [
+      0,
+      new ReadableTextProxy(
+        useOptions.stdin ||
+          (() => {
+            return "";
+          }),
+      ),
+    ],
+    [1, new WritableTextProxy(useOptions.stdout || console.log, outputBuffers)],
+    [
+      2,
+      new WritableTextProxy(useOptions.stderr || console.error, outputBuffers),
+    ],
+  ]);
+  for (const [key, handler] of Object.entries(useOptions.extraFds || {})) {
+    const fd = Number(key);
+    if (!Number.isInteger(fd) || fd < 3 || fd > 0xffffffff) {
+      throw new RangeError(
+        `extraFds keys must be fd numbers from 3 to 4294967295, got ${key}`,
+      );
+    }
+    fdTable.set(
+      fd,
+      "read" in handler
+        ? new ReadableTextProxy(handler.read)
+        : new WritableTextProxy(handler.write, outputBuffers),
+    );
+  }
+  return fdTable;
 }
 
 /**
@@ -191,6 +215,18 @@ function bindStdio(
  * });
  * ```
  *
+ * To give the guest more character devices than stdio, pass `extraFds`:
+ *
+ * ```js
+ * const wasi = new WASI({
+ *   features: [
+ *     useStdio({
+ *       extraFds: { 3: { write: (lines) => report.push(lines) } },
+ *     })
+ *   ],
+ * });
+ * ```
+ *
  * This provides `fd_write`, `fd_prestat_get` and `fd_prestat_dir_name` implementations to make libc work with minimal effort.
  */
 export function useStdio(useOptions: StdioOptions = {}): WASIFeatureProvider {
@@ -198,14 +234,14 @@ export function useStdio(useOptions: StdioOptions = {}): WASIFeatureProvider {
     const fdTable = bindStdio(useOptions);
     return {
       fd_fdstat_get: (fd: number, buf: number) => {
-        const fdEntry = fdTable[fd];
+        const fdEntry = fdTable.get(fd);
         if (!fdEntry) return WASIAbi.WASI_ERRNO_BADF;
         const view = memoryView();
         abi.writeFdstat(view, buf, WASIAbi.WASI_FILETYPE_CHARACTER_DEVICE, 0);
         return WASIAbi.WASI_ESUCCESS;
       },
       fd_filestat_get: (fd: number, buf: number) => {
-        const fdEntry = fdTable[fd];
+        const fdEntry = fdTable.get(fd);
         if (!fdEntry) return WASIAbi.WASI_ERRNO_BADF;
         const view = memoryView();
         abi.writeFilestat(view, buf, WASIAbi.WASI_FILETYPE_CHARACTER_DEVICE);
@@ -223,7 +259,7 @@ export function useStdio(useOptions: StdioOptions = {}): WASIFeatureProvider {
         iovsLen: number,
         nwritten: number,
       ) => {
-        const fdEntry = fdTable[fd];
+        const fdEntry = fdTable.get(fd);
         if (!fdEntry) return WASIAbi.WASI_ERRNO_BADF;
         const view = memoryView();
         const iovsBuffers = abi.iovViews(view, iovs, iovsLen);
@@ -232,7 +268,7 @@ export function useStdio(useOptions: StdioOptions = {}): WASIFeatureProvider {
         return WASIAbi.WASI_ESUCCESS;
       },
       fd_read: (fd: number, iovs: number, iovsLen: number, nread: number) => {
-        const fdEntry = fdTable[fd];
+        const fdEntry = fdTable.get(fd);
         if (!fdEntry) return WASIAbi.WASI_ERRNO_BADF;
         const view = memoryView();
         const iovsBuffers = abi.iovViews(view, iovs, iovsLen);
@@ -974,10 +1010,18 @@ export function useMemoryFS(
       });
     });
 
+    // wasi-libc finds preopens by probing fd_prestat_get upward from 3 and
+    // stops at the first fd that is not one, so preopens must be contiguous
+    // from 3 and extra stdio fds cannot sit among them.
     let nextFd = 3;
     for (const preopenPath of fileSystem.getPreopenPaths()) {
       const node = fileSystem.lookup(preopenPath);
       if (node && node.type === "dir") {
+        if (files.has(nextFd)) {
+          throw new RangeError(
+            `extraFds must be above the preopened directories, got ${nextFd}, which is taken by preopen "${preopenPath}"`,
+          );
+        }
         files.set(nextFd, {
           node,
           position: 0,
@@ -1537,6 +1581,7 @@ export function useMemoryFS(
         }
 
         const typeMask = node.type === "dir" ? DIRECTORY_RIGHTS : FILE_RIGHTS;
+        while (files.has(nextFd)) nextFd++;
         files.set(nextFd, {
           node,
           position: 0,
