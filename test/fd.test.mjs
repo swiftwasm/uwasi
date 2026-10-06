@@ -97,6 +97,81 @@ function write({ imports, view, bytes }, fd, length, fill) {
   assert.strictEqual(ret, ESUCCESS, `fd_write errno ${ret}`);
 }
 
+describe("fd.useMemoryFS prototype filenames", () => {
+  for (const name of [
+    "__proto__",
+    "constructor",
+    "toString",
+    "hasOwnProperty",
+  ]) {
+    it(`stores ${name} as an ordinary host-created file`, () => {
+      const fs = new MemoryFileSystem();
+      const dir = fs.ensureDir("/files");
+      assert.strictEqual(fs.lookup(`/files/${name}`), null);
+
+      fs.addFile(`/files/${name}`, "content");
+      assert.strictEqual(
+        new TextDecoder().decode(fs.lookup(`/files/${name}`).content),
+        "content",
+      );
+      assert.deepStrictEqual(Object.keys(dir.entries), [name]);
+
+      fs.removeEntry(`/files/${name}`);
+      assert.strictEqual(fs.lookup(`/files/${name}`), null);
+      assert.deepStrictEqual(Object.keys(dir.entries), []);
+    });
+
+    it(`builds nested host directories named ${name}`, () => {
+      const fs = new MemoryFileSystem();
+      fs.addFile(`/${name}/${name}/file`, "nested");
+      assert.strictEqual(fs.lookup(`/${name}`).type, "dir");
+      assert.strictEqual(fs.lookup(`/${name}/${name}`).type, "dir");
+      assert.strictEqual(
+        new TextDecoder().decode(fs.lookup(`/${name}/${name}/file`).content),
+        "nested",
+      );
+    });
+
+    it(`creates and unlinks ${name} through guest syscalls`, () => {
+      const h = makeFS();
+      h.bytes.set(new TextEncoder().encode(name), PATH_PTR);
+      assert.strictEqual(
+        h.imports.path_open(
+          PREOPEN_FD,
+          0,
+          PATH_PTR,
+          name.length,
+          0,
+          ALL_RIGHTS,
+          ALL_RIGHTS,
+          0,
+          OUT_PTR,
+        ),
+        WASIAbi.WASI_ERRNO_NOENT,
+      );
+      assert.strictEqual(
+        h.imports.path_create_directory(PREOPEN_FD, PATH_PTR, name.length),
+        ESUCCESS,
+      );
+
+      const path = `${name}/${name}`;
+      const fd = openFile(h, path, OFLAGS_CREAT | WASIAbi.WASI_OFLAGS_EXCL);
+      write(h, fd, 3, 65);
+      assert.deepStrictEqual(
+        h.fs.lookup(`/${path}`).content,
+        new Uint8Array([65, 65, 65]),
+      );
+      assert.strictEqual(h.imports.fd_close(fd), ESUCCESS);
+      assert.strictEqual(
+        h.imports.path_unlink_file(PREOPEN_FD, PATH_PTR, path.length),
+        ESUCCESS,
+      );
+      assert.strictEqual(h.fs.lookup(`/${path}`), null);
+      assert.deepStrictEqual(Object.keys(h.fs.lookup(`/${name}`).entries), []);
+    });
+  }
+});
+
 describe("fd.useMemoryFS growth", () => {
   it("keeps content correct across many small appends", () => {
     const h = makeFS();

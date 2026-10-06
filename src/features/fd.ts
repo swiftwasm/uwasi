@@ -401,7 +401,7 @@ function stampMeta<T extends object>(node: T): T & NodeMeta {
   return meta;
 }
 function makeDir(): DirectoryNode {
-  return stampMeta({ type: "dir" as const, entries: {} });
+  return stampMeta({ type: "dir" as const, entries: Object.create(null) });
 }
 function makeFile(content: Uint8Array): FileNode {
   // Web IDL rejects views over a resizable buffer wherever it expects a
