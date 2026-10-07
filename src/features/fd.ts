@@ -358,18 +358,24 @@ interface DirectoryNode extends NodeMeta {
 }
 
 /**
+ * The number of names that link a non-directory node, as `stat` reports it.
+ */
+interface LinkCount {
+  nlink: number;
+}
+
+/**
  * Represents a node in the file system that is a file.
  */
-interface FileNode extends NodeMeta {
+interface FileNode extends NodeMeta, LinkCount {
   readonly type: "file";
   content: Uint8Array;
-  nlink: number;
 }
 
 /**
  * Represents a symbolic link.
  */
-interface SymlinkNode extends NodeMeta {
+interface SymlinkNode extends NodeMeta, LinkCount {
   readonly type: "symlink";
   target: string;
 }
@@ -378,7 +384,8 @@ type CharacterDeviceNode = (
   | { readonly type: "character"; kind: "stdio"; entry: FdEntry }
   | { readonly type: "character"; kind: "devnull" }
 ) &
-  NodeMeta;
+  NodeMeta &
+  LinkCount;
 
 /**
  * Union type representing any node in the file system.
@@ -397,6 +404,12 @@ function stampMeta<T extends object>(node: T): T & NodeMeta {
     meta.atim = now;
     meta.mtim = now;
     meta.ctim = now;
+  }
+  // A node built by hand, such as a symlink passed to `setNode`, may not
+  // have a link count yet.
+  const counted = node as { type?: string; nlink?: number };
+  if (counted.type !== "dir" && counted.nlink === undefined) {
+    counted.nlink = 1;
   }
   return meta;
 }
@@ -417,7 +430,7 @@ function makeFile(content: Uint8Array): FileNode {
   return stampMeta({ type: "file" as const, content, nlink: 1 });
 }
 function makeSymlink(target: string): SymlinkNode {
-  return stampMeta({ type: "symlink" as const, target });
+  return stampMeta({ type: "symlink" as const, target, nlink: 1 });
 }
 
 const SYMLOOP_MAX = 32;
@@ -555,7 +568,7 @@ export class MemoryFileSystem {
     this.ensureDir("/dev");
     this.setNode(
       "/dev/null",
-      stampMeta({ type: "character", kind: "devnull" }),
+      stampMeta({ type: "character", kind: "devnull", nlink: 1 }),
     );
 
     // Setup preopened directories
@@ -787,6 +800,20 @@ function filetypeOf(node: FSNode): number {
   }
 }
 
+/** Whether `dir` is `root` itself or lies anywhere inside its subtree. */
+function isWithin(dir: DirectoryNode, root: DirectoryNode): boolean {
+  const pending = [root];
+  while (pending.length > 0) {
+    const current = pending.pop()!;
+    if (current === dir) return true;
+    for (const name of Object.keys(current.entries)) {
+      const child = current.entries[name];
+      if (child.type === "dir") pending.push(child);
+    }
+  }
+  return false;
+}
+
 const MEMFS_DEV = BigInt(1);
 
 function statOf(node: FSNode): {
@@ -799,10 +826,9 @@ function statOf(node: FSNode): {
   ctim: bigint;
 } {
   let size = 0;
-  let nlink = 1;
+  const nlink = node.type === "dir" ? 1 : node.nlink;
   if (node.type === "file") {
     size = node.content.byteLength;
-    nlink = node.nlink;
   } else if (node.type === "symlink") {
     size = new TextEncoder().encode(node.target).byteLength;
   }
@@ -996,7 +1022,7 @@ export function useMemoryFS(
 
     bindStdio(useOptions.withStdio || {}).forEach((entry, fd) => {
       files.set(fd, {
-        node: stampMeta({ type: "character", kind: "stdio", entry }),
+        node: stampMeta({ type: "character", kind: "stdio", entry, nlink: 1 }),
         position: 0,
         fdflags: 0,
         rightsBase:
@@ -1218,6 +1244,11 @@ export function useMemoryFS(
         // current cursor, and never moves the cursor.
         let position = Number(offset);
         const total = iovViews.reduce((acc, b) => acc + b.byteLength, 0);
+        // Writing nothing changes nothing, not even the size past EOF.
+        if (total === 0) {
+          view.setUint32(nwritten, 0, true);
+          return WASIAbi.WASI_ESUCCESS;
+        }
         if (position + total > file.node.content.byteLength) {
           const errno = resizeFile(file.node, position + total);
           if (errno !== WASIAbi.WASI_ESUCCESS) return errno;
@@ -1403,6 +1434,11 @@ export function useMemoryFS(
             ? file.node.content.byteLength
             : file.position;
         const total = iovViews.reduce((acc, b) => acc + b.byteLength, 0);
+        // Writing nothing changes nothing, not even the size past EOF.
+        if (total === 0) {
+          view.setUint32(nwritten, 0, true);
+          return WASIAbi.WASI_ESUCCESS;
+        }
         if (position + total > file.node.content.byteLength) {
           const errno = resizeFile(file.node, position + total);
           if (errno !== WASIAbi.WASI_ESUCCESS) return errno;
@@ -1509,7 +1545,7 @@ export function useMemoryFS(
         if (target.node) return WASIAbi.WASI_ERRNO_EXIST;
         if (!target.parent || !target.name) return WASIAbi.WASI_ERRNO_NOENT;
         target.parent.entries[target.name] = source.node;
-        if (source.node.type === "file") source.node.nlink++;
+        source.node.nlink++;
         return WASIAbi.WASI_ESUCCESS;
       },
 
@@ -1656,6 +1692,17 @@ export function useMemoryFS(
         if (target.trailingSlash && source.node.type !== "dir") {
           return WASIAbi.WASI_ERRNO_NOTDIR;
         }
+        // POSIX: when both names already link the same node, rename succeeds
+        // and does nothing else.
+        if (target.node === source.node) return WASIAbi.WASI_ESUCCESS;
+        // A directory cannot move into its own subtree: it would detach
+        // itself, and everything in it, from the tree.
+        if (
+          source.node.type === "dir" &&
+          isWithin(target.parent, source.node)
+        ) {
+          return WASIAbi.WASI_ERRNO_INVAL;
+        }
         if (target.node) {
           if (source.node.type === "dir") {
             if (target.node.type !== "dir") return WASIAbi.WASI_ERRNO_NOTDIR;
@@ -1664,7 +1711,7 @@ export function useMemoryFS(
             }
           } else {
             if (target.node.type === "dir") return WASIAbi.WASI_ERRNO_ISDIR;
-            if (target.node.type === "file") target.node.nlink--;
+            target.node.nlink--;
           }
         }
         delete source.parent.entries[source.name];
@@ -1709,7 +1756,7 @@ export function useMemoryFS(
         if (!resolved.parent || !resolved.name) {
           return WASIAbi.WASI_ERRNO_INVAL;
         }
-        if (resolved.node.type === "file") resolved.node.nlink--;
+        resolved.node.nlink--;
         delete resolved.parent.entries[resolved.name];
         return WASIAbi.WASI_ESUCCESS;
       },

@@ -172,6 +172,143 @@ describe("fd.useMemoryFS prototype filenames", () => {
   }
 });
 
+const PATH2_PTR = 128;
+const FILESTAT_PTR = OUT_PTR + 16;
+
+function putPaths({ bytes }, from, to) {
+  const encoder = new TextEncoder();
+  const fromBytes = encoder.encode(from);
+  const toBytes = encoder.encode(to);
+  bytes.set(fromBytes, PATH_PTR);
+  bytes.set(toBytes, PATH2_PTR);
+  return [fromBytes.length, toBytes.length];
+}
+
+function mkdir(h, name) {
+  const path = new TextEncoder().encode(name);
+  h.bytes.set(path, PATH_PTR);
+  return h.imports.path_create_directory(PREOPEN_FD, PATH_PTR, path.length);
+}
+
+function rename(h, from, to) {
+  const [fromLen, toLen] = putPaths(h, from, to);
+  return h.imports.path_rename(
+    PREOPEN_FD,
+    PATH_PTR,
+    fromLen,
+    PREOPEN_FD,
+    PATH2_PTR,
+    toLen,
+  );
+}
+
+function link(h, from, to) {
+  const [fromLen, toLen] = putPaths(h, from, to);
+  return h.imports.path_link(
+    PREOPEN_FD,
+    0,
+    PATH_PTR,
+    fromLen,
+    PREOPEN_FD,
+    PATH2_PTR,
+    toLen,
+  );
+}
+
+function unlink(h, name) {
+  const path = new TextEncoder().encode(name);
+  h.bytes.set(path, PATH_PTR);
+  return h.imports.path_unlink_file(PREOPEN_FD, PATH_PTR, path.length);
+}
+
+/** path_filestat_get without following a final symlink; returns nlink. */
+function lstatLinks(h, name) {
+  const path = new TextEncoder().encode(name);
+  h.bytes.set(path, PATH_PTR);
+  const ret = h.imports.path_filestat_get(
+    PREOPEN_FD,
+    0,
+    PATH_PTR,
+    path.length,
+    FILESTAT_PTR,
+  );
+  assert.strictEqual(ret, ESUCCESS, `path_filestat_get(${name}) errno ${ret}`);
+  // filestat layout: dev(8) ino(8) filetype(1+7) nlink(8) ...
+  return Number(h.view.getBigUint64(FILESTAT_PTR + 24, true));
+}
+
+describe("fd.useMemoryFS namespace edge cases", () => {
+  it("refuses to move a directory into its own subtree", () => {
+    const h = makeFS();
+    assert.strictEqual(mkdir(h, "a"), ESUCCESS);
+    assert.strictEqual(mkdir(h, "a/b"), ESUCCESS);
+    for (const target of ["a/c", "a/b/c"]) {
+      assert.strictEqual(rename(h, "a", target), WASIAbi.WASI_ERRNO_INVAL);
+      assert.strictEqual(h.fs.lookup("/a/b").type, "dir");
+    }
+  });
+
+  it("does not extend a file for a zero-length write past its end", () => {
+    const h = makeFS();
+    const fd = openFile(h, "empty");
+    h.view.setUint32(IOVEC_PTR, DATA_PTR, true);
+    h.view.setUint32(IOVEC_PTR + 4, 0, true);
+    assert.strictEqual(
+      h.imports.fd_pwrite(fd, IOVEC_PTR, 1, 10n, OUT_PTR + 8),
+      ESUCCESS,
+    );
+    assert.strictEqual(h.view.getUint32(OUT_PTR + 8, true), 0);
+    assert.strictEqual(h.fs.lookup("/empty").content.byteLength, 0);
+
+    assert.strictEqual(
+      h.imports.fd_seek(fd, 10n, WASIAbi.WASI_WHENCE_SET, OUT_PTR + 16),
+      ESUCCESS,
+    );
+    assert.strictEqual(
+      h.imports.fd_write(fd, IOVEC_PTR, 1, OUT_PTR + 8),
+      ESUCCESS,
+    );
+    assert.strictEqual(h.fs.lookup("/empty").content.byteLength, 0);
+  });
+
+  for (const [kind, prepare] of [
+    [
+      "symlinks",
+      (h) => {
+        const [targetLen, nameLen] = putPaths(h, "target", "node");
+        return h.imports.path_symlink(
+          PATH_PTR,
+          targetLen,
+          PREOPEN_FD,
+          PATH2_PTR,
+          nameLen,
+        );
+      },
+    ],
+    ["device nodes", (h) => link(h, "dev/null", "node")],
+  ]) {
+    it(`counts hard links to ${kind}`, () => {
+      const h = makeFS();
+      assert.strictEqual(prepare(h), ESUCCESS);
+      const before = lstatLinks(h, "node");
+      assert.strictEqual(link(h, "node", "second"), ESUCCESS);
+      assert.strictEqual(lstatLinks(h, "node"), before + 1);
+      assert.strictEqual(lstatLinks(h, "second"), before + 1);
+      assert.strictEqual(unlink(h, "second"), ESUCCESS);
+      assert.strictEqual(lstatLinks(h, "node"), before);
+    });
+  }
+
+  it("does nothing when renaming onto another link to the same file", () => {
+    const h = makeFS();
+    assert.strictEqual(h.imports.fd_close(openFile(h, "f")), ESUCCESS);
+    assert.strictEqual(link(h, "f", "g"), ESUCCESS);
+    assert.strictEqual(rename(h, "f", "g"), ESUCCESS);
+    assert.strictEqual(h.fs.lookup("/f"), h.fs.lookup("/g"));
+    assert.strictEqual(lstatLinks(h, "f"), 2);
+  });
+});
+
 describe("fd.useMemoryFS growth", () => {
   it("keeps content correct across many small appends", () => {
     const h = makeFS();
