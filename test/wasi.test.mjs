@@ -8,7 +8,7 @@ import assert from "node:assert";
 import * as crypto from "crypto";
 
 /**
- * @typedef {{ exit_code?: number, args?: string[], env?: Record<string, string>, dirs?: string[] }} TestCaseConfig
+ * @typedef {{ exit_code?: number, args?: string[], env?: Record<string, string>, root?: string, stdout?: string, stderr?: string }} TestCaseConfig
  * @typedef {{ suite: string, wasmFile: string, testName: string, config: TestCaseConfig }} TestCase
  */
 
@@ -20,9 +20,12 @@ import * as crypto from "crypto";
  */
 function findTestCases(testDir) {
   const testSuites = [
-    { path: "rust/testsuite", name: "WASI Rust tests" },
-    { path: "c/testsuite", name: "WASI C tests" },
-    { path: "assemblyscript/testsuite", name: "WASI AssemblyScript tests" },
+    { path: "rust/testsuite/wasm32-wasip1", name: "WASI Rust tests" },
+    { path: "c/testsuite/wasm32-wasip1", name: "WASI C tests" },
+    {
+      path: "assemblyscript/testsuite/wasm32-wasip1",
+      name: "WASI AssemblyScript tests",
+    },
   ];
 
   /** @type {Array<TestCase>} */
@@ -82,20 +85,12 @@ async function runTest(testCase) {
     }
   }
 
-  // Setup file system
-  const fileSystem = new MemoryFileSystem(
-    (testCase.config.dirs || []).reduce((obj, dir) => {
-      obj[dir] = dir;
-      return obj;
-    }, {}),
-  );
-
-  // Clone directories to memory file system
-  if (testCase.config.dirs) {
-    for (const dir of testCase.config.dirs) {
-      const dirPath = path.join(path.dirname(testCase.wasmFile), dir);
-      await cloneDirectoryToMemFS(fileSystem, dirPath, "/" + dir);
-    }
+  // Preopen the test's root directory, if any, as the guest's "/".
+  const root = testCase.config.root;
+  const fileSystem = new MemoryFileSystem(root ? { "/": "/" } : {});
+  if (root) {
+    const rootPath = path.join(path.dirname(testCase.wasmFile), root);
+    await cloneDirectoryToMemFS(fileSystem, rootPath, "/");
   }
 
   // Create stdout and stderr buffers
@@ -221,6 +216,12 @@ describe("WASI Test Suite", () => {
         testCase.config.exit_code || 0,
         result.stderr,
       );
+      for (const stream of ["stdout", "stderr"]) {
+        const expected = testCase.config[stream];
+        if (expected !== undefined) {
+          assert.strictEqual(result[stream], expected, stream);
+        }
+      }
     });
   }
 });
