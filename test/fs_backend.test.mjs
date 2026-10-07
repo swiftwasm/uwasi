@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
+import { createRequire } from "node:module";
 import { describe, it } from "node:test";
+import { WASI, useFS } from "uwasi";
+import * as filesystem from "uwasi/filesystem";
 import { WASIAbi } from "../lib/esm/abi.js";
 import { FSError } from "../lib/esm/filesystem/error.js";
 import { MemoryFileSystem } from "../lib/esm/filesystem/namespace.js";
@@ -258,5 +261,89 @@ describe("a backend that keeps bytes outside FileNode.content", () => {
     assert.equal(sysLstat(h, "file").errno, WASIAbi.WASI_ERRNO_NOENT);
     assert.equal(sysSeekStart(h, fd), ESUCCESS);
     assert.equal(sysReadText(h, fd).text, "kept");
+  });
+});
+
+describe("useFS and uwasi/filesystem", () => {
+  it("export one provider and the backend API, from ESM and CommonJS", () => {
+    assert.equal(filesystem.useFS, useFS);
+    for (const name of ["MemoryFSBackend", "MemoryFileSystem", "FSError"]) {
+      assert.equal(typeof filesystem[name], "function", name);
+    }
+    assert.equal(filesystem.FSErrno.NOSPC, WASIAbi.WASI_ERRNO_NOSPC);
+
+    const require = createRequire(import.meta.url);
+    assert.equal(require("uwasi/filesystem").useFS, require("uwasi").useFS);
+  });
+
+  it("serves the syscalls from the backend, with the namespace's preopens", () => {
+    const fileSystem = new filesystem.MemoryFileSystem({ "/store": "/" });
+    const wasi = new WASI({
+      preopens: { "/ignored": "/" },
+      features: [
+        useFS({
+          withBackend: new filesystem.MemoryFSBackend(),
+          withFileSystem: fileSystem,
+        }),
+      ],
+    });
+    const memory = new WebAssembly.Memory({ initial: 1 });
+    wasi.setInstance({ exports: { memory } });
+    const h = {
+      imports: wasi.wasiImport,
+      view: new DataView(memory.buffer),
+      bytes: new Uint8Array(memory.buffer),
+    };
+    assert.equal(h.imports.fd_prestat_get(3, 4096), ESUCCESS);
+    const length = h.view.getUint32(4100, true);
+    assert.equal(h.imports.fd_prestat_dir_name(3, 512, length), ESUCCESS);
+    assert.equal(
+      new TextDecoder().decode(h.bytes.subarray(512, 512 + length)),
+      "/store",
+    );
+
+    const { errno, fd } = sysCreate(h, "file.txt");
+    assert.equal(errno, ESUCCESS);
+    assert.deepEqual(sysWrite(h, fd, "stored"), { errno: 0, written: 6 });
+    assert.equal(sysSeekStart(h, fd), ESUCCESS);
+    assert.equal(sysReadText(h, fd).text, "stored");
+    assert.equal(sysClose(h, fd), ESUCCESS);
+  });
+});
+
+describe("MemoryFSBackend", () => {
+  const backend = new filesystem.MemoryFSBackend();
+  const fs = new filesystem.MemoryFileSystem();
+  const read = (file) => {
+    const bytes = new Uint8Array(backend.fileSize(file));
+    assert.equal(backend.readAt(file, bytes, 0), bytes.length);
+    return [...bytes];
+  };
+
+  it("writes and resizes with zero fill, and reads short at the end", () => {
+    const file = fs.createFile("/bytes", new Uint8Array([1, 2, 3]));
+    backend.writeAt(file, new Uint8Array([9]), 1);
+    backend.writeAt(file, new Uint8Array([7]), 5);
+    assert.deepEqual(read(file), [1, 9, 3, 0, 0, 7]);
+    assert.equal(backend.readAt(file, new Uint8Array(4), 4), 2);
+    assert.equal(backend.readAt(file, new Uint8Array(4), 10), 0);
+    backend.resize(file, 1);
+    backend.resize(file, 3);
+    assert.deepEqual(read(file), [1, 0, 0]);
+  });
+
+  it("applies namespace changes to the live tree", () => {
+    const from = fs.ensureDir("/from");
+    const to = fs.ensureDir("/to");
+    const file = fs.createFile("/scratch", new Uint8Array(0));
+    backend.createChild(from, "a", file);
+    backend.linkChild(to, "b", file);
+    assert.equal(from.entries.a, file);
+    assert.equal(to.entries.b, file);
+    backend.renameChild(from, "a", to, "c");
+    assert.deepEqual(Object.keys(from.entries), []);
+    assert.equal(to.entries.c, file);
+    backend.removeChild(to, "b");
+    assert.deepEqual(Object.keys(to.entries), ["c"]);
   });
 });

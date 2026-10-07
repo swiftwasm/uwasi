@@ -8,6 +8,17 @@
     ".": {
       "import": "./lib/esm/index.js",
       "require": "./lib/cjs/index.js"
+    },
+    "./filesystem": {
+      "import": "./lib/esm/filesystem/index.js",
+      "require": "./lib/cjs/filesystem/index.js"
+    }
+  },
+  "typesVersions": {
+    "*": {
+      "filesystem": [
+        "lib/cjs/filesystem/index.d.ts"
+      ]
     }
   },
   "scripts": {

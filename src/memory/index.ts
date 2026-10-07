@@ -2,7 +2,7 @@ import { WASIAbi } from "../abi.js";
 import { WASIFeatureProvider, WASIOptions } from "../options.js";
 import { MemoryFileSystem } from "../filesystem/namespace.js";
 import { StdioOptions } from "../filesystem/stdio.js";
-import { bindFSSyscalls } from "../filesystem/handlers.js";
+import { useFS } from "../filesystem/index.js";
 import { MemoryFSBackend } from "./backend.js";
 
 /**
@@ -62,12 +62,10 @@ export function useMemoryFS(
   ) => {
     const fileSystem =
       useOptions.withFileSystem || new MemoryFileSystem(wasiOptions.preopens);
-    return bindFSSyscalls(
-      new MemoryFSBackend(),
-      fileSystem,
-      useOptions.withStdio || {},
-      abi,
-      memoryView,
-    );
+    return useFS({
+      withBackend: new MemoryFSBackend(),
+      withFileSystem: fileSystem,
+      withStdio: useOptions.withStdio,
+    })(wasiOptions, abi, memoryView);
   };
 }
