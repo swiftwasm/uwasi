@@ -1232,6 +1232,11 @@ export function useMemoryFS(
         // current cursor, and never moves the cursor.
         let position = Number(offset);
         const total = iovViews.reduce((acc, b) => acc + b.byteLength, 0);
+        // Writing nothing changes nothing, not even the size past EOF.
+        if (total === 0) {
+          view.setUint32(nwritten, 0, true);
+          return WASIAbi.WASI_ESUCCESS;
+        }
         if (position + total > file.node.content.byteLength) {
           const errno = resizeFile(file.node, position + total);
           if (errno !== WASIAbi.WASI_ESUCCESS) return errno;
@@ -1417,6 +1422,11 @@ export function useMemoryFS(
             ? file.node.content.byteLength
             : file.position;
         const total = iovViews.reduce((acc, b) => acc + b.byteLength, 0);
+        // Writing nothing changes nothing, not even the size past EOF.
+        if (total === 0) {
+          view.setUint32(nwritten, 0, true);
+          return WASIAbi.WASI_ESUCCESS;
+        }
         if (position + total > file.node.content.byteLength) {
           const errno = resizeFile(file.node, position + total);
           if (errno !== WASIAbi.WASI_ESUCCESS) return errno;

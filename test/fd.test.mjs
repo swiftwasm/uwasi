@@ -212,6 +212,29 @@ describe("fd.useMemoryFS namespace edge cases", () => {
       assert.strictEqual(h.fs.lookup("/a/b").type, "dir");
     }
   });
+
+  it("does not extend a file for a zero-length write past its end", () => {
+    const h = makeFS();
+    const fd = openFile(h, "empty");
+    h.view.setUint32(IOVEC_PTR, DATA_PTR, true);
+    h.view.setUint32(IOVEC_PTR + 4, 0, true);
+    assert.strictEqual(
+      h.imports.fd_pwrite(fd, IOVEC_PTR, 1, 10n, OUT_PTR + 8),
+      ESUCCESS,
+    );
+    assert.strictEqual(h.view.getUint32(OUT_PTR + 8, true), 0);
+    assert.strictEqual(h.fs.lookup("/empty").content.byteLength, 0);
+
+    assert.strictEqual(
+      h.imports.fd_seek(fd, 10n, WASIAbi.WASI_WHENCE_SET, OUT_PTR + 16),
+      ESUCCESS,
+    );
+    assert.strictEqual(
+      h.imports.fd_write(fd, IOVEC_PTR, 1, OUT_PTR + 8),
+      ESUCCESS,
+    );
+    assert.strictEqual(h.fs.lookup("/empty").content.byteLength, 0);
+  });
 });
 
 describe("fd.useMemoryFS growth", () => {
