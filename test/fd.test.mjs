@@ -202,6 +202,41 @@ function rename(h, from, to) {
   );
 }
 
+function link(h, from, to) {
+  const [fromLen, toLen] = putPaths(h, from, to);
+  return h.imports.path_link(
+    PREOPEN_FD,
+    0,
+    PATH_PTR,
+    fromLen,
+    PREOPEN_FD,
+    PATH2_PTR,
+    toLen,
+  );
+}
+
+function unlink(h, name) {
+  const path = new TextEncoder().encode(name);
+  h.bytes.set(path, PATH_PTR);
+  return h.imports.path_unlink_file(PREOPEN_FD, PATH_PTR, path.length);
+}
+
+/** path_filestat_get without following a final symlink; returns nlink. */
+function lstatLinks(h, name) {
+  const path = new TextEncoder().encode(name);
+  h.bytes.set(path, PATH_PTR);
+  const ret = h.imports.path_filestat_get(
+    PREOPEN_FD,
+    0,
+    PATH_PTR,
+    path.length,
+    FILESTAT_PTR,
+  );
+  assert.strictEqual(ret, ESUCCESS, `path_filestat_get(${name}) errno ${ret}`);
+  // filestat layout: dev(8) ino(8) filetype(1+7) nlink(8) ...
+  return Number(h.view.getBigUint64(FILESTAT_PTR + 24, true));
+}
+
 describe("fd.useMemoryFS namespace edge cases", () => {
   it("refuses to move a directory into its own subtree", () => {
     const h = makeFS();
@@ -235,6 +270,34 @@ describe("fd.useMemoryFS namespace edge cases", () => {
     );
     assert.strictEqual(h.fs.lookup("/empty").content.byteLength, 0);
   });
+
+  for (const [kind, prepare] of [
+    [
+      "symlinks",
+      (h) => {
+        const [targetLen, nameLen] = putPaths(h, "target", "node");
+        return h.imports.path_symlink(
+          PATH_PTR,
+          targetLen,
+          PREOPEN_FD,
+          PATH2_PTR,
+          nameLen,
+        );
+      },
+    ],
+    ["device nodes", (h) => link(h, "dev/null", "node")],
+  ]) {
+    it(`counts hard links to ${kind}`, () => {
+      const h = makeFS();
+      assert.strictEqual(prepare(h), ESUCCESS);
+      const before = lstatLinks(h, "node");
+      assert.strictEqual(link(h, "node", "second"), ESUCCESS);
+      assert.strictEqual(lstatLinks(h, "node"), before + 1);
+      assert.strictEqual(lstatLinks(h, "second"), before + 1);
+      assert.strictEqual(unlink(h, "second"), ESUCCESS);
+      assert.strictEqual(lstatLinks(h, "node"), before);
+    });
+  }
 });
 
 describe("fd.useMemoryFS growth", () => {
