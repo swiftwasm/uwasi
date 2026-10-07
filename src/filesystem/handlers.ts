@@ -1,4 +1,6 @@
 import { WASIAbi } from "../abi.js";
+import { FSBackend } from "./backend.js";
+import { FSError } from "./error.js";
 import {
   DirectoryNode,
   FileNode,
@@ -12,7 +14,6 @@ import {
   resolvePath,
   ResolveSuccess,
 } from "./namespace.js";
-import { resizeContent } from "./content.js";
 import { bindStdio, StdioOptions } from "./stdio.js";
 
 type FileDescriptor = number;
@@ -119,7 +120,10 @@ function isWithin(dir: DirectoryNode, root: DirectoryNode): boolean {
 
 const MEMFS_DEV = BigInt(1);
 
-function statOf(node: FSNode): {
+function statOf(
+  backend: FSBackend,
+  node: FSNode,
+): {
   dev: bigint;
   ino: bigint;
   nlink: bigint;
@@ -131,7 +135,7 @@ function statOf(node: FSNode): {
   let size = 0;
   const nlink = node.type === "dir" ? 1 : node.nlink;
   if (node.type === "file") {
-    size = node.content.byteLength;
+    size = backend.fileSize(node);
   } else if (node.type === "symlink") {
     size = new TextEncoder().encode(node.target).byteLength;
   }
@@ -146,17 +150,19 @@ function statOf(node: FSNode): {
   };
 }
 
-/**
- * Resize a file's backing buffer, zero-filling any growth. Returns an errno.
- *
- * A guest chooses this size, so it can ask for one no JavaScript engine will
- * allocate. Both failures return an errno rather than throw: an exception
- * raised inside an import unwinds through the guest and traps the module,
- * which leaves the guest no way to see the error or recover from it.
- */
 const MAX_FILE_SIZE = Number.MAX_SAFE_INTEGER;
 
-function resizeFile(node: FileNode, size: number): number {
+/**
+ * Resize a file to `size` bytes, zero-filling any growth. Returns an errno
+ * for a size that no file can have; the backend throws `FSError` when the
+ * storage fails.
+ *
+ * A guest chooses this size, so it can ask for any value. Every failure
+ * reaches the guest as an errno: an exception raised inside an import
+ * unwinds through the guest and traps the module, which leaves the guest
+ * no way to see the error or recover from it.
+ */
+function resizeFile(backend: FSBackend, node: FileNode, size: number): number {
   // Anything that is not a whole, non-negative count of bytes is a bad
   // argument, whatever its magnitude: `NaN`, a fraction, `Infinity`, or a
   // negative. Only a well-formed size that is simply too big is a large file.
@@ -164,16 +170,8 @@ function resizeFile(node: FileNode, size: number): number {
   // Above 2^53 a size no longer survives the trip through a JS number, so it
   // can be neither honoured nor reported back accurately.
   if (size > MAX_FILE_SIZE) return WASIAbi.WASI_ERRNO_FBIG;
-  if (size === node.content.byteLength) return WASIAbi.WASI_ESUCCESS;
-
-  try {
-    node.content = resizeContent(node.content, size);
-  } catch (error) {
-    // The engine refused the allocation. For a filesystem held in memory,
-    // that is the same condition as a full disk.
-    if (error instanceof RangeError) return WASIAbi.WASI_ERRNO_NOSPC;
-    throw error;
-  }
+  if (size === backend.fileSize(node)) return WASIAbi.WASI_ESUCCESS;
+  backend.resize(node, size);
   node.mtim = nowNs();
   return WASIAbi.WASI_ESUCCESS;
 }
@@ -203,10 +201,13 @@ function applyTimes(
 }
 
 /**
- * Bind the file-system syscalls to `fileSystem`, which supplies the node
- * tree and preopens, and to the stdio described by `withStdio`.
+ * Bind the file-system syscalls to `backend`, which holds the bytes and
+ * persists namespace changes, and to `fileSystem`, which supplies the node
+ * tree and preopens. Path resolution, rights, the fd table and errno
+ * mapping are the same for every backend.
  */
 export function bindFSSyscalls(
+  backend: FSBackend,
   fileSystem: MemoryFileSystem,
   withStdio: StdioOptions,
   abi: WASIAbi,
@@ -279,7 +280,52 @@ export function bindFSSyscalls(
     return { dir, ...result };
   };
 
-  return {
+  /**
+   * Write `iovViews` to `node` from `position`, and return the end position.
+   * The backend extends the file itself, so there is no resize first: that
+   * would cost a backend with real files an extra truncate. Each iovec is
+   * one `writeAt`. When a later one fails, the earlier ones stay written,
+   * and the syscall reports only the errno.
+   */
+  const writeIovecs = (
+    node: FileNode,
+    iovViews: Uint8Array[],
+    position: number,
+  ): number => {
+    for (const buf of iovViews) {
+      if (buf.byteLength === 0) continue;
+      backend.writeAt(node, buf, position);
+      position += buf.byteLength;
+    }
+    node.mtim = nowNs();
+    return position;
+  };
+
+  /** Read into `iovViews` from `position`; returns the bytes read. */
+  const readIovecs = (
+    node: FileNode,
+    iovViews: Uint8Array[],
+    position: number,
+  ): number => {
+    let totalRead = 0;
+    for (const buf of iovViews) {
+      const count = backend.readAt(node, buf, position + totalRead);
+      totalRead += count;
+      if (count < buf.byteLength) break;
+    }
+    return totalRead;
+  };
+
+  /** Release an fd's hold on its node: close stdio, or tell the backend. */
+  const release = (file: OpenFile): void => {
+    if (file.node.type === "character" && file.node.kind === "stdio") {
+      file.node.entry.close();
+    } else if (file.node.type === "file") {
+      backend.closeFile(file.node);
+    }
+  };
+
+  const syscalls: WebAssembly.ModuleImports = {
     fd_advise: (fd: number, _offset: bigint, _len: bigint, advice: number) => {
       const file = getFile(fd);
       if (!file) return WASIAbi.WASI_ERRNO_BADF;
@@ -293,9 +339,8 @@ export function bindFSSyscalls(
       if (file.node.type === "dir") return WASIAbi.WASI_ERRNO_ISDIR;
       if (file.node.type !== "file") return WASIAbi.WASI_ERRNO_NOTSUP;
       const end = Number(offset) + Number(len);
-      if (end > file.node.content.byteLength) {
-        const errno = resizeFile(file.node, end);
-        if (errno !== WASIAbi.WASI_ESUCCESS) return errno;
+      if (end > backend.fileSize(file.node)) {
+        return resizeFile(backend, file.node, end);
       }
       return WASIAbi.WASI_ESUCCESS;
     },
@@ -303,19 +348,28 @@ export function bindFSSyscalls(
     fd_close: (fd: number) => {
       const file = getFile(fd);
       if (!file) return WASIAbi.WASI_ERRNO_BADF;
-      if (file.node.type === "character" && file.node.kind === "stdio") {
-        file.node.entry.close();
-      }
+      // Release the fd first, so that it is gone even if the close fails.
       files.delete(fd);
+      release(file);
       return WASIAbi.WASI_ESUCCESS;
     },
 
     fd_datasync: (fd: number) => {
-      return getFile(fd) ? WASIAbi.WASI_ESUCCESS : WASIAbi.WASI_ERRNO_BADF;
+      const file = getFile(fd);
+      if (!file) return WASIAbi.WASI_ERRNO_BADF;
+      if (file.node.type === "file" || file.node.type === "dir") {
+        backend.datasync(file.node);
+      }
+      return WASIAbi.WASI_ESUCCESS;
     },
 
     fd_sync: (fd: number) => {
-      return getFile(fd) ? WASIAbi.WASI_ESUCCESS : WASIAbi.WASI_ERRNO_BADF;
+      const file = getFile(fd);
+      if (!file) return WASIAbi.WASI_ERRNO_BADF;
+      if (file.node.type === "file" || file.node.type === "dir") {
+        backend.sync(file.node);
+      }
+      return WASIAbi.WASI_ESUCCESS;
     },
 
     fd_fdstat_get: (fd: number, buf: number) => {
@@ -355,7 +409,12 @@ export function bindFSSyscalls(
       const file = getFile(fd);
       if (!file) return WASIAbi.WASI_ERRNO_BADF;
       const view = memoryView();
-      abi.writeFilestat(view, buf, filetypeOf(file.node), statOf(file.node));
+      abi.writeFilestat(
+        view,
+        buf,
+        filetypeOf(file.node),
+        statOf(backend, file.node),
+      );
       return WASIAbi.WASI_ESUCCESS;
     },
 
@@ -363,9 +422,7 @@ export function bindFSSyscalls(
       const file = getFile(fd);
       if (!file) return WASIAbi.WASI_ERRNO_BADF;
       if (file.node.type !== "file") return WASIAbi.WASI_ERRNO_INVAL;
-      const errno = resizeFile(file.node, Number(size));
-      if (errno !== WASIAbi.WASI_ESUCCESS) return errno;
-      return WASIAbi.WASI_ESUCCESS;
+      return resizeFile(backend, file.node, Number(size));
     },
 
     fd_filestat_set_times: (
@@ -397,18 +454,7 @@ export function bindFSSyscalls(
       }
       const view = memoryView();
       const iovViews = abi.iovViews(view, iovs, iovsLen);
-      const data = file.node.content;
-      let position = Number(offset);
-      let totalRead = 0;
-      for (const buf of iovViews) {
-        const available = data.byteLength - position;
-        if (available <= 0) break;
-        const count = Math.min(buf.byteLength, available);
-        buf.set(data.subarray(position, position + count));
-        position += count;
-        totalRead += count;
-        if (count < buf.byteLength) break;
-      }
+      const totalRead = readIovecs(file.node, iovViews, Number(offset));
       view.setUint32(nread, totalRead, true);
       return WASIAbi.WASI_ESUCCESS;
     },
@@ -431,22 +477,15 @@ export function bindFSSyscalls(
       const iovViews = abi.iovViews(view, iovs, iovsLen);
       // pwrite writes at the explicit offset, ignoring APPEND and the
       // current cursor, and never moves the cursor.
-      let position = Number(offset);
+      const position = Number(offset);
       const total = iovViews.reduce((acc, b) => acc + b.byteLength, 0);
       // Writing nothing changes nothing, not even the size past EOF.
       if (total === 0) {
         view.setUint32(nwritten, 0, true);
         return WASIAbi.WASI_ESUCCESS;
       }
-      if (position + total > file.node.content.byteLength) {
-        const errno = resizeFile(file.node, position + total);
-        if (errno !== WASIAbi.WASI_ESUCCESS) return errno;
-      }
-      for (const buf of iovViews) {
-        file.node.content.set(buf, position);
-        position += buf.byteLength;
-      }
-      file.node.mtim = nowNs();
+      if (position + total > MAX_FILE_SIZE) return WASIAbi.WASI_ERRNO_FBIG;
+      writeIovecs(file.node, iovViews, position);
       view.setUint32(nwritten, total, true);
       return WASIAbi.WASI_ESUCCESS;
     },
@@ -472,17 +511,7 @@ export function bindFSSyscalls(
         return WASIAbi.WASI_ERRNO_NOTCAPABLE;
       }
 
-      const data = file.node.content;
-      let totalRead = 0;
-      for (const buf of iovViews) {
-        const available = data.byteLength - file.position - totalRead;
-        if (available <= 0) break;
-        const count = Math.min(buf.byteLength, available);
-        const start = file.position + totalRead;
-        buf.set(data.subarray(start, start + count));
-        totalRead += count;
-        if (count < buf.byteLength) break;
-      }
+      const totalRead = readIovecs(file.node, iovViews, file.position);
       file.position += totalRead;
       view.setUint32(nread, totalRead, true);
       return WASIAbi.WASI_ESUCCESS;
@@ -541,11 +570,9 @@ export function bindFSSyscalls(
       // The destination must be an already-open fd; renumber replaces it.
       const target = getFile(to);
       if (!target) return WASIAbi.WASI_ERRNO_BADF;
-      if (target.node.type === "character" && target.node.kind === "stdio") {
-        target.node.entry.close();
-      }
       files.set(to, source);
       files.delete(from);
+      release(target);
       return WASIAbi.WASI_ESUCCESS;
     },
 
@@ -569,7 +596,7 @@ export function bindFSSyscalls(
           position = file.position + delta;
           break;
         case WASIAbi.WASI_WHENCE_END:
-          position = file.node.content.byteLength + delta;
+          position = backend.fileSize(file.node) + delta;
           break;
         default:
           return WASIAbi.WASI_ERRNO_INVAL;
@@ -613,9 +640,9 @@ export function bindFSSyscalls(
         return WASIAbi.WASI_ERRNO_NOTCAPABLE;
       }
 
-      let position =
+      const position =
         (file.fdflags & WASIAbi.WASI_FDFLAGS_APPEND) !== 0
-          ? file.node.content.byteLength
+          ? backend.fileSize(file.node)
           : file.position;
       const total = iovViews.reduce((acc, b) => acc + b.byteLength, 0);
       // Writing nothing changes nothing, not even the size past EOF.
@@ -623,16 +650,8 @@ export function bindFSSyscalls(
         view.setUint32(nwritten, 0, true);
         return WASIAbi.WASI_ESUCCESS;
       }
-      if (position + total > file.node.content.byteLength) {
-        const errno = resizeFile(file.node, position + total);
-        if (errno !== WASIAbi.WASI_ESUCCESS) return errno;
-      }
-      for (const buf of iovViews) {
-        file.node.content.set(buf, position);
-        position += buf.byteLength;
-      }
-      file.position = position;
-      file.node.mtim = nowNs();
+      if (position + total > MAX_FILE_SIZE) return WASIAbi.WASI_ERRNO_FBIG;
+      file.position = writeIovecs(file.node, iovViews, position);
       view.setUint32(nwritten, total, true);
       return WASIAbi.WASI_ESUCCESS;
     },
@@ -663,7 +682,7 @@ export function bindFSSyscalls(
       if (!resolved.parent || !resolved.name) {
         return WASIAbi.WASI_ERRNO_NOENT;
       }
-      resolved.parent.entries[resolved.name] = makeDir();
+      backend.createChild(resolved.parent, resolved.name, makeDir());
       return WASIAbi.WASI_ESUCCESS;
     },
 
@@ -683,7 +702,7 @@ export function bindFSSyscalls(
         view,
         buf,
         filetypeOf(resolved.node),
-        statOf(resolved.node),
+        statOf(backend, resolved.node),
       );
       return WASIAbi.WASI_ESUCCESS;
     },
@@ -728,7 +747,7 @@ export function bindFSSyscalls(
       if (target.trailingSlash) return WASIAbi.WASI_ERRNO_NOENT;
       if (target.node) return WASIAbi.WASI_ERRNO_EXIST;
       if (!target.parent || !target.name) return WASIAbi.WASI_ERRNO_NOENT;
-      target.parent.entries[target.name] = source.node;
+      backend.linkChild(target.parent, target.name, source.node);
       source.node.nlink++;
       return WASIAbi.WASI_ESUCCESS;
     },
@@ -758,6 +777,7 @@ export function bindFSSyscalls(
       }
 
       let node = resolved.node;
+      let truncate = false;
       if (node) {
         if (node.type === "symlink") {
           // An unfollowed final symlink cannot be opened.
@@ -783,8 +803,7 @@ export function bindFSSyscalls(
           if ((dir.rightsBase & RIGHTS.PATH_FILESTAT_SET_SIZE) === BIG_ZERO) {
             return WASIAbi.WASI_ERRNO_NOTCAPABLE;
           }
-          const errno = resizeFile(node, 0);
-          if (errno !== WASIAbi.WASI_ESUCCESS) return errno;
+          truncate = true;
         }
       } else {
         if ((oflags & WASIAbi.WASI_OFLAGS_CREAT) === 0) {
@@ -795,8 +814,20 @@ export function bindFSSyscalls(
           return WASIAbi.WASI_ERRNO_NOENT;
         }
         const created = makeFile(new Uint8Array(0));
-        resolved.parent.entries[resolved.name] = created;
+        backend.createChild(resolved.parent, resolved.name, created);
         node = created;
+      }
+
+      if (node.type === "file") {
+        backend.openFile(node);
+        // Truncate only once the file is open, so that a backend can hold
+        // its handle for the resize. If the resize fails, nothing holds it.
+        try {
+          if (truncate) resizeFile(backend, node, 0);
+        } catch (error) {
+          backend.closeFile(node);
+          throw error;
+        }
       }
 
       const typeMask = node.type === "dir" ? DIRECTORY_RIGHTS : FILE_RIGHTS;
@@ -850,7 +881,7 @@ export function bindFSSyscalls(
       if (Object.keys(resolved.node.entries).length > 0) {
         return WASIAbi.WASI_ERRNO_NOTEMPTY;
       }
-      delete resolved.parent.entries[resolved.name];
+      backend.removeChild(resolved.parent, resolved.name);
       return WASIAbi.WASI_ESUCCESS;
     },
 
@@ -891,11 +922,15 @@ export function bindFSSyscalls(
           }
         } else {
           if (target.node.type === "dir") return WASIAbi.WASI_ERRNO_ISDIR;
-          target.node.nlink--;
         }
       }
-      delete source.parent.entries[source.name];
-      target.parent.entries[target.name] = source.node;
+      backend.renameChild(
+        source.parent,
+        source.name,
+        target.parent,
+        target.name,
+      );
+      if (target.node && target.node.type !== "dir") target.node.nlink--;
       return WASIAbi.WASI_ESUCCESS;
     },
 
@@ -923,7 +958,11 @@ export function bindFSSyscalls(
       if (!resolved.parent || !resolved.name) {
         return WASIAbi.WASI_ERRNO_NOENT;
       }
-      resolved.parent.entries[resolved.name] = makeSymlink(targetPath);
+      backend.createChild(
+        resolved.parent,
+        resolved.name,
+        makeSymlink(targetPath),
+      );
       return WASIAbi.WASI_ESUCCESS;
     },
 
@@ -936,8 +975,8 @@ export function bindFSSyscalls(
       if (!resolved.parent || !resolved.name) {
         return WASIAbi.WASI_ERRNO_INVAL;
       }
+      backend.removeChild(resolved.parent, resolved.name);
       resolved.node.nlink--;
-      delete resolved.parent.entries[resolved.name];
       return WASIAbi.WASI_ESUCCESS;
     },
 
@@ -948,4 +987,19 @@ export function bindFSSyscalls(
       return WASIAbi.WASI_ERRNO_NOTSOCK;
     },
   };
+
+  // A backend reports a storage failure by throwing `FSError`. Return its
+  // errno to the guest; let any other exception through, as a bug.
+  for (const [name, syscall] of Object.entries(syscalls)) {
+    if (typeof syscall !== "function") continue;
+    syscalls[name] = (...args: (number | bigint)[]) => {
+      try {
+        return syscall(...args);
+      } catch (error) {
+        if (error instanceof FSError) return error.errno;
+        throw error;
+      }
+    };
+  }
+  return syscalls;
 }

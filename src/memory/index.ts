@@ -3,6 +3,7 @@ import { WASIFeatureProvider, WASIOptions } from "../options.js";
 import { MemoryFileSystem } from "../filesystem/namespace.js";
 import { StdioOptions } from "../filesystem/stdio.js";
 import { bindFSSyscalls } from "../filesystem/handlers.js";
+import { MemoryFSBackend } from "./backend.js";
 
 /**
  * Creates a feature provider that implements a complete in-memory file system.
@@ -62,6 +63,7 @@ export function useMemoryFS(
     const fileSystem =
       useOptions.withFileSystem || new MemoryFileSystem(wasiOptions.preopens);
     return bindFSSyscalls(
+      new MemoryFSBackend(),
       fileSystem,
       useOptions.withStdio || {},
       abi,
