@@ -1692,6 +1692,9 @@ export function useMemoryFS(
         if (target.trailingSlash && source.node.type !== "dir") {
           return WASIAbi.WASI_ERRNO_NOTDIR;
         }
+        // POSIX: when both names already link the same node, rename succeeds
+        // and does nothing else.
+        if (target.node === source.node) return WASIAbi.WASI_ESUCCESS;
         // A directory cannot move into its own subtree: it would detach
         // itself, and everything in it, from the tree.
         if (

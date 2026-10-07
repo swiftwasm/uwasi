@@ -298,6 +298,15 @@ describe("fd.useMemoryFS namespace edge cases", () => {
       assert.strictEqual(lstatLinks(h, "node"), before);
     });
   }
+
+  it("does nothing when renaming onto another link to the same file", () => {
+    const h = makeFS();
+    assert.strictEqual(h.imports.fd_close(openFile(h, "f")), ESUCCESS);
+    assert.strictEqual(link(h, "f", "g"), ESUCCESS);
+    assert.strictEqual(rename(h, "f", "g"), ESUCCESS);
+    assert.strictEqual(h.fs.lookup("/f"), h.fs.lookup("/g"));
+    assert.strictEqual(lstatLinks(h, "f"), 2);
+  });
 });
 
 describe("fd.useMemoryFS growth", () => {
