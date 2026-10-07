@@ -787,6 +787,20 @@ function filetypeOf(node: FSNode): number {
   }
 }
 
+/** Whether `dir` is `root` itself or lies anywhere inside its subtree. */
+function isWithin(dir: DirectoryNode, root: DirectoryNode): boolean {
+  const pending = [root];
+  while (pending.length > 0) {
+    const current = pending.pop()!;
+    if (current === dir) return true;
+    for (const name of Object.keys(current.entries)) {
+      const child = current.entries[name];
+      if (child.type === "dir") pending.push(child);
+    }
+  }
+  return false;
+}
+
 const MEMFS_DEV = BigInt(1);
 
 function statOf(node: FSNode): {
@@ -1655,6 +1669,14 @@ export function useMemoryFS(
         if (!target.parent || !target.name) return WASIAbi.WASI_ERRNO_INVAL;
         if (target.trailingSlash && source.node.type !== "dir") {
           return WASIAbi.WASI_ERRNO_NOTDIR;
+        }
+        // A directory cannot move into its own subtree: it would detach
+        // itself, and everything in it, from the tree.
+        if (
+          source.node.type === "dir" &&
+          isWithin(target.parent, source.node)
+        ) {
+          return WASIAbi.WASI_ERRNO_INVAL;
         }
         if (target.node) {
           if (source.node.type === "dir") {

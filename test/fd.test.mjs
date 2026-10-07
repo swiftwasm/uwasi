@@ -172,6 +172,48 @@ describe("fd.useMemoryFS prototype filenames", () => {
   }
 });
 
+const PATH2_PTR = 128;
+const FILESTAT_PTR = OUT_PTR + 16;
+
+function putPaths({ bytes }, from, to) {
+  const encoder = new TextEncoder();
+  const fromBytes = encoder.encode(from);
+  const toBytes = encoder.encode(to);
+  bytes.set(fromBytes, PATH_PTR);
+  bytes.set(toBytes, PATH2_PTR);
+  return [fromBytes.length, toBytes.length];
+}
+
+function mkdir(h, name) {
+  const path = new TextEncoder().encode(name);
+  h.bytes.set(path, PATH_PTR);
+  return h.imports.path_create_directory(PREOPEN_FD, PATH_PTR, path.length);
+}
+
+function rename(h, from, to) {
+  const [fromLen, toLen] = putPaths(h, from, to);
+  return h.imports.path_rename(
+    PREOPEN_FD,
+    PATH_PTR,
+    fromLen,
+    PREOPEN_FD,
+    PATH2_PTR,
+    toLen,
+  );
+}
+
+describe("fd.useMemoryFS namespace edge cases", () => {
+  it("refuses to move a directory into its own subtree", () => {
+    const h = makeFS();
+    assert.strictEqual(mkdir(h, "a"), ESUCCESS);
+    assert.strictEqual(mkdir(h, "a/b"), ESUCCESS);
+    for (const target of ["a/c", "a/b/c"]) {
+      assert.strictEqual(rename(h, "a", target), WASIAbi.WASI_ERRNO_INVAL);
+      assert.strictEqual(h.fs.lookup("/a/b").type, "dir");
+    }
+  });
+});
+
 describe("fd.useMemoryFS growth", () => {
   it("keeps content correct across many small appends", () => {
     const h = makeFS();
