@@ -309,6 +309,19 @@ describe("fd.useMemoryFS namespace edge cases", () => {
   });
 });
 
+describe("fd.MemoryFileSystem inode numbers", () => {
+  it("are counted per filesystem", () => {
+    const build = () => {
+      const h = makeFS();
+      h.fs.addFile("/host", "host");
+      assert.strictEqual(h.imports.fd_close(openFile(h, "guest")), ESUCCESS);
+      return [h.fs.lookup("/host").ino, h.fs.lookup("/guest").ino];
+    };
+    const first = build();
+    assert.deepStrictEqual(build(), first);
+  });
+});
+
 describe("fd.useMemoryFS growth", () => {
   it("keeps content correct across many small appends", () => {
     const h = makeFS();

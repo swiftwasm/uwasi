@@ -7,7 +7,6 @@ import {
   FSNode,
   MemoryFileSystem,
   nowNs,
-  stampMeta,
   makeDir,
   makeFile,
   makeSymlink,
@@ -220,7 +219,12 @@ export function bindFSSyscalls(
 
   bindStdio(withStdio).forEach((entry, fd) => {
     files.set(fd, {
-      node: stampMeta({ type: "character", kind: "stdio", entry, nlink: 1 }),
+      node: fileSystem.stamp({
+        type: "character",
+        kind: "stdio",
+        entry,
+        nlink: 1,
+      }),
       position: 0,
       fdflags: 0,
       rightsBase:
@@ -702,7 +706,7 @@ export function bindFSSyscalls(
       if (!resolved.parent || !resolved.name) {
         return WASIAbi.WASI_ERRNO_NOENT;
       }
-      const dir = makeDir();
+      const dir = makeDir(fileSystem);
       backend.createChild(resolved.parent, resolved.name, dir);
       resolved.parent.entries[resolved.name] = dir;
       return WASIAbi.WASI_ESUCCESS;
@@ -836,7 +840,7 @@ export function bindFSSyscalls(
         if (!resolved.parent || !resolved.name) {
           return WASIAbi.WASI_ERRNO_NOENT;
         }
-        const created = makeFile(new Uint8Array(0));
+        const created = makeFile(fileSystem, new Uint8Array(0));
         backend.createChild(resolved.parent, resolved.name, created);
         resolved.parent.entries[resolved.name] = created;
         node = created;
@@ -989,7 +993,7 @@ export function bindFSSyscalls(
       if (!resolved.parent || !resolved.name) {
         return WASIAbi.WASI_ERRNO_NOENT;
       }
-      const link = makeSymlink(targetPath);
+      const link = makeSymlink(fileSystem, targetPath);
       backend.createChild(resolved.parent, resolved.name, link);
       resolved.parent.entries[resolved.name] = link;
       return WASIAbi.WASI_ESUCCESS;

@@ -2,7 +2,7 @@ import { WASIAbi } from "../abi.js";
 import { FdEntry } from "./stdio.js";
 import { isResizable, ownBuffers } from "./content.js";
 
-interface NodeMeta {
+export interface NodeMeta {
   ino: bigint;
   atim: bigint;
   mtim: bigint;
@@ -56,31 +56,13 @@ export type FSNode =
   | SymlinkNode
   | CharacterDeviceNode;
 
-let nextIno = 1;
 export function nowNs(): bigint {
   return BigInt(Date.now()) * BigInt(1_000_000);
 }
-export function stampMeta<T extends object>(node: T): T & NodeMeta {
-  const meta = node as T & NodeMeta;
-  if (meta.ino === undefined) {
-    const now = nowNs();
-    meta.ino = BigInt(nextIno++);
-    meta.atim = now;
-    meta.mtim = now;
-    meta.ctim = now;
-  }
-  // A node built by hand, such as a symlink passed to `setNode`, may not
-  // have a link count yet.
-  const counted = node as { type?: string; nlink?: number };
-  if (counted.type !== "dir" && counted.nlink === undefined) {
-    counted.nlink = 1;
-  }
-  return meta;
+export function makeDir(fs: MemoryFileSystem): DirectoryNode {
+  return fs.stamp({ type: "dir" as const, entries: Object.create(null) });
 }
-export function makeDir(): DirectoryNode {
-  return stampMeta({ type: "dir" as const, entries: Object.create(null) });
-}
-export function makeFile(content: Uint8Array): FileNode {
+export function makeFile(fs: MemoryFileSystem, content: Uint8Array): FileNode {
   // Web IDL rejects views over a resizable buffer wherever it expects a
   // `BufferSource`, so those contents could never be handed back out. Copy once.
   if (isResizable(content.buffer)) {
@@ -91,10 +73,10 @@ export function makeFile(content: Uint8Array): FileNode {
   // first then takes a fresh buffer, and neither can write over the other's
   // bytes by reusing spare room or zeroing after a shrink.
   ownBuffers.delete(content.buffer);
-  return stampMeta({ type: "file" as const, content, nlink: 1 });
+  return fs.stamp({ type: "file" as const, content, nlink: 1 });
 }
-export function makeSymlink(target: string): SymlinkNode {
-  return stampMeta({ type: "symlink" as const, target, nlink: 1 });
+export function makeSymlink(fs: MemoryFileSystem, target: string): SymlinkNode {
+  return fs.stamp({ type: "symlink" as const, target, nlink: 1 });
 }
 
 const SYMLOOP_MAX = 32;
@@ -205,6 +187,8 @@ type FileContent = string | Uint8Array | Blob;
  * In-memory implementation of a file system.
  */
 export class MemoryFileSystem {
+  /** The next inode number; each filesystem counts its own. */
+  private nextIno = 1;
   private root: DirectoryNode;
   private preopenPaths: string[] = [];
 
@@ -213,13 +197,13 @@ export class MemoryFileSystem {
    * @param preopens Optional list of directories to pre-open
    */
   constructor(preopens?: { [guestPath: string]: string } | undefined) {
-    this.root = makeDir();
+    this.root = makeDir(this);
 
     // Setup essential directories and special files
     this.ensureDir("/dev");
     this.setNode(
       "/dev/null",
-      stampMeta({ type: "character", kind: "devnull", nlink: 1 }),
+      this.stamp({ type: "character", kind: "devnull", nlink: 1 }),
     );
 
     // Setup preopened directories
@@ -259,9 +243,35 @@ export class MemoryFileSystem {
    * @returns The created file node
    */
   createFile(path: string, content: Uint8Array): FileNode {
-    const fileNode = makeFile(content);
+    const fileNode = makeFile(this, content);
     this.setNode(path, fileNode);
     return fileNode;
+  }
+
+  /**
+   * Gives `node` an inode number from this filesystem, and timestamps,
+   * unless it has them already. A non-directory node without a link count
+   * gets 1. Nodes that this filesystem or the syscalls create are stamped
+   * already; this is for nodes built by hand.
+   * @param node The node to stamp
+   * @returns The same node
+   */
+  stamp<T extends object>(node: T): T & NodeMeta {
+    const meta = node as T & NodeMeta;
+    if (meta.ino === undefined) {
+      const now = nowNs();
+      meta.ino = BigInt(this.nextIno++);
+      meta.atim = now;
+      meta.mtim = now;
+      meta.ctim = now;
+    }
+    // A node built by hand, such as a symlink passed to `setNode`, may not
+    // have a link count yet.
+    const counted = node as { type?: string; nlink?: number };
+    if (counted.type !== "dir" && counted.nlink === undefined) {
+      counted.nlink = 1;
+    }
+    return meta;
   }
 
   /**
@@ -270,7 +280,7 @@ export class MemoryFileSystem {
    * @param node The node to set
    */
   setNode(path: string, node: FSNode): void {
-    stampMeta(node);
+    this.stamp(node);
     const normalizedPath = normalizePath(path);
     const parts = normalizedPath.split("/").filter((p) => p.length > 0);
 
@@ -348,7 +358,7 @@ export class MemoryFileSystem {
 
     for (const part of parts) {
       if (!current.entries[part]) {
-        current.entries[part] = makeDir();
+        current.entries[part] = makeDir(this);
       }
 
       const next = current.entries[part];
@@ -381,7 +391,7 @@ export class MemoryFileSystem {
 
     for (const part of parts) {
       if (!current.entries[part]) {
-        current.entries[part] = makeDir();
+        current.entries[part] = makeDir(this);
       }
 
       const next = current.entries[part];
@@ -392,7 +402,7 @@ export class MemoryFileSystem {
       current = next;
     }
 
-    const fileNode = makeFile(new Uint8Array(0));
+    const fileNode = makeFile(this, new Uint8Array(0));
     current.entries[fileName] = fileNode;
     return fileNode;
   }
