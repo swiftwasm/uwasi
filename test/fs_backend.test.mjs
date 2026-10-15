@@ -27,18 +27,34 @@ const READ_RIGHTS = (1n << 1n) | (1n << 2n) | (1n << 5n) | (1n << 21n);
 const WRITE_RIGHTS = 1n << 6n;
 const { WASI_ERRNO_IO: IO, WASI_ERRNO_NOSPC: NOSPC } = WASIAbi;
 
-/** A memory backend that records the calls the syscall layer makes. */
+const HANDLE_METHODS = ["readAt", "writeAt", "resize", "sync", "datasync"];
+
+/**
+ * A memory backend that records the calls the syscall layer makes. A test
+ * can replace a handle method with `handlePatch[name] = (inner, ...args)`.
+ */
 class RecordingBackend extends MemoryFSBackend {
   calls = [];
-  constructor() {
-    super();
-    for (const method of ["openFile", "closeFile", "resize", "linkChild"]) {
-      const inner = this[method].bind(this);
-      this[method] = (...args) => {
-        this.calls.push(method);
-        return inner(...args);
+  handles = [];
+  handlePatch = {};
+  openFile(node, mode) {
+    this.calls.push("openFile");
+    const handle = super.openFile(node, mode);
+    const wrapped = {};
+    for (const name of [...HANDLE_METHODS, "close"]) {
+      const inner = handle[name].bind(handle);
+      wrapped[name] = (...args) => {
+        if (name === "resize" || name === "close") this.calls.push(name);
+        const patch = this.handlePatch[name];
+        return patch ? patch(inner, ...args) : inner(...args);
       };
     }
+    this.handles.push(wrapped);
+    return wrapped;
+  }
+  linkChild(...args) {
+    this.calls.push("linkChild");
+    return super.linkChild(...args);
   }
 }
 
@@ -51,13 +67,13 @@ describe("FSBackend seam", () => {
   it("returns the errno of an FSError and lets other errors through", () => {
     const { backend, h } = setup();
     const { fd } = sysCreate(h, "file");
-    backend.readAt = () => {
+    backend.handlePatch.readAt = () => {
       throw new FSError(IO);
     };
     assert.equal(sysReadText(h, fd).errno, IO);
 
     const bug = new TypeError("backend bug");
-    backend.readAt = () => {
+    backend.handlePatch.readAt = () => {
       throw bug;
     };
     assert.throws(
@@ -66,11 +82,11 @@ describe("FSBackend seam", () => {
     );
   });
 
-  /** Make the backend's `writeAt` calls go through `write(call, ...args)`. */
+  /** Make handle `writeAt` calls go through `write(call, inner, ...args)`. */
   function wrapWrites(backend, write) {
-    const writeAt = backend.writeAt.bind(backend);
     let call = 0;
-    backend.writeAt = (...args) => write(++call, writeAt, ...args);
+    backend.handlePatch.writeAt = (inner, ...args) =>
+      write(++call, inner, ...args);
   }
   const tell = (h, fd) => {
     assert.equal(h.imports.fd_tell(fd, 8192), ESUCCESS);
@@ -96,8 +112,8 @@ describe("FSBackend seam", () => {
   it("stops at a short writeAt and reports what it wrote", () => {
     const { backend, h } = setup();
     const { fd } = sysCreate(h, "file");
-    wrapWrites(backend, (call, writeAt, node, data, offset) =>
-      writeAt(node, data.subarray(0, 2), offset),
+    wrapWrites(backend, (call, writeAt, data, offset) =>
+      writeAt(data.subarray(0, 2), offset),
     );
     assert.deepEqual(sysWrite(h, fd, "first", "second"), {
       errno: ESUCCESS,
@@ -155,24 +171,33 @@ describe("FSBackend seam", () => {
     assert.deepEqual(backend.calls, []);
   });
 
-  it("calls openFile and closeFile once for each fd", () => {
+  it("gives each fd its own handle, and closes each once", () => {
     const { backend, h } = setup();
     const first = sysCreate(h, "file");
     const second = sysOpen(h, "file");
+    assert.notEqual(backend.handles[0], backend.handles[1]);
+    assert.equal(sysWrite(h, first.fd, "data").errno, ESUCCESS);
     assert.equal(sysClose(h, first.fd), ESUCCESS);
+    assert.equal(sysReadText(h, second.fd).text, "data");
     assert.equal(sysClose(h, second.fd), ESUCCESS);
-    assert.deepEqual(backend.calls, [
-      "openFile",
-      "openFile",
-      "closeFile",
-      "closeFile",
-    ]);
+    assert.deepEqual(backend.calls, ["openFile", "openFile", "close", "close"]);
   });
 
-  it("releases the fd even when closeFile fails", () => {
+  it("closes the replaced handle on fd_renumber, and keeps the moved one", () => {
+    const { backend, h } = setup();
+    const a = sysCreate(h, "a");
+    assert.equal(sysWrite(h, a.fd, "from a").errno, ESUCCESS);
+    const b = sysCreate(h, "b");
+    assert.equal(h.imports.fd_renumber(a.fd, b.fd), ESUCCESS);
+    assert.deepEqual(backend.calls.slice(-1), ["close"]);
+    assert.equal(sysSeekStart(h, b.fd), ESUCCESS);
+    assert.equal(sysReadText(h, b.fd).text, "from a");
+  });
+
+  it("releases the fd even when its handle fails to close", () => {
     const { backend, h } = setup();
     const { fd } = sysCreate(h, "file");
-    backend.closeFile = () => {
+    backend.handlePatch.close = () => {
       throw new FSError(IO);
     };
     assert.equal(sysClose(h, fd), IO);
@@ -192,12 +217,11 @@ describe("FSBackend seam", () => {
 
     assert.deepEqual(sysWrite(h, trunc.fd, "data").errno, 0);
     backend.calls.length = 0;
-    backend.resize = (...args) => {
-      backend.calls.push("resize");
+    backend.handlePatch.resize = () => {
       throw new FSError(IO);
     };
     assert.equal(sysOpen(h, "file", WASIAbi.WASI_OFLAGS_TRUNC).errno, IO);
-    assert.deepEqual(backend.calls, ["openFile", "resize", "closeFile"]);
+    assert.deepEqual(backend.calls, ["openFile", "resize", "close"]);
   });
 
   it("keeps the file contents when openFile fails before a truncate", () => {
@@ -245,26 +269,31 @@ class MapBackend {
   fileSize(node) {
     return this.#data(node).byteLength;
   }
-  readAt(node, buf, offset) {
-    const data = this.#data(node).subarray(offset, offset + buf.byteLength);
-    buf.set(data);
-    return data.byteLength;
-  }
-  writeAt(node, data, offset) {
-    const end = offset + data.byteLength;
-    if (end > this.fileSize(node)) this.resize(node, end);
-    this.#data(node).set(data, offset);
-    return data.byteLength;
-  }
-  resize(node, size) {
+  #resize(node, size) {
     const next = new Uint8Array(size);
     next.set(this.#data(node).subarray(0, size));
     this.bytes.set(node, next);
   }
-  sync() {}
-  datasync() {}
-  openFile() {}
-  closeFile() {}
+  openFile(node) {
+    return {
+      readAt: (buf, offset) => {
+        const data = this.#data(node).subarray(offset, offset + buf.length);
+        buf.set(data);
+        return data.byteLength;
+      },
+      writeAt: (data, offset) => {
+        const end = offset + data.byteLength;
+        if (end > this.fileSize(node)) this.#resize(node, end);
+        this.#data(node).set(data, offset);
+        return data.byteLength;
+      },
+      resize: (size) => this.#resize(node, size),
+      sync() {},
+      datasync() {},
+      close() {},
+    };
+  }
+  syncDirectory() {}
   createChild(parent, name) {
     this.changes.push(["create", name, Object.keys(parent.entries)]);
   }
@@ -408,23 +437,24 @@ describe("useFS and uwasi/filesystem", () => {
 });
 
 describe("MemoryFSBackend", () => {
-  const backend = new filesystem.MemoryFSBackend();
-  const fs = new filesystem.MemoryFileSystem();
-  const read = (file) => {
-    const bytes = new Uint8Array(backend.fileSize(file));
-    assert.equal(backend.readAt(file, bytes, 0), bytes.length);
-    return [...bytes];
-  };
-
   it("writes and resizes with zero fill, and reads short at the end", () => {
+    const backend = new filesystem.MemoryFSBackend();
+    const fs = new filesystem.MemoryFileSystem();
     const file = fs.createFile("/bytes", new Uint8Array([1, 2, 3]));
-    backend.writeAt(file, new Uint8Array([9]), 1);
-    backend.writeAt(file, new Uint8Array([7]), 5);
-    assert.deepEqual(read(file), [1, 9, 3, 0, 0, 7]);
-    assert.equal(backend.readAt(file, new Uint8Array(4), 4), 2);
-    assert.equal(backend.readAt(file, new Uint8Array(4), 10), 0);
-    backend.resize(file, 1);
-    backend.resize(file, 3);
-    assert.deepEqual(read(file), [1, 0, 0]);
+    const handle = backend.openFile(file, { read: true, write: true });
+    const read = () => {
+      const bytes = new Uint8Array(backend.fileSize(file));
+      assert.equal(handle.readAt(bytes, 0), bytes.length);
+      return [...bytes];
+    };
+    assert.equal(handle.writeAt(new Uint8Array([9]), 1), 1);
+    assert.equal(handle.writeAt(new Uint8Array([7]), 5), 1);
+    assert.deepEqual(read(), [1, 9, 3, 0, 0, 7]);
+    assert.equal(handle.readAt(new Uint8Array(4), 4), 2);
+    assert.equal(handle.readAt(new Uint8Array(4), 10), 0);
+    handle.resize(1);
+    handle.resize(3);
+    assert.deepEqual(read(), [1, 0, 0]);
+    handle.close();
   });
 });

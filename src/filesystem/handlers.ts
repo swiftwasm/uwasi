@@ -1,5 +1,5 @@
 import { WASIAbi } from "../abi.js";
-import { FSBackend } from "./backend.js";
+import { FileHandle, FSBackend } from "./backend.js";
 import { FSError } from "./error.js";
 import {
   DirectoryNode,
@@ -85,6 +85,8 @@ const DIRECTORY_RIGHTS =
  */
 interface OpenFile {
   node: FSNode;
+  /** The backend's handle, for a regular file. */
+  handle?: FileHandle;
   position: number;
   fdflags: number;
   rightsBase: bigint;
@@ -164,7 +166,12 @@ const MAX_FILE_SIZE = Number.MAX_SAFE_INTEGER;
  * unwinds through the guest and traps the module, which leaves the guest
  * no way to see the error or recover from it.
  */
-function resizeFile(backend: FSBackend, node: FileNode, size: number): number {
+function resizeFile(
+  backend: FSBackend,
+  node: FileNode,
+  handle: FileHandle,
+  size: number,
+): number {
   // Anything that is not a whole, non-negative count of bytes is a bad
   // argument, whatever its magnitude: `NaN`, a fraction, `Infinity`, or a
   // negative. Only a well-formed size that is simply too big is a large file.
@@ -173,7 +180,7 @@ function resizeFile(backend: FSBackend, node: FileNode, size: number): number {
   // can be neither honoured nor reported back accurately.
   if (size > MAX_FILE_SIZE) return WASIAbi.WASI_ERRNO_FBIG;
   if (size === backend.fileSize(node)) return WASIAbi.WASI_ESUCCESS;
-  backend.resize(node, size);
+  handle.resize(size);
   node.mtim = nowNs();
   return WASIAbi.WASI_ESUCCESS;
 }
@@ -300,6 +307,7 @@ export function bindFSSyscalls(
    */
   const writeIovecs = (
     node: FileNode,
+    handle: FileHandle,
     iovViews: Uint8Array[],
     position: number,
   ): number => {
@@ -307,7 +315,7 @@ export function bindFSSyscalls(
     try {
       for (const buf of iovViews) {
         if (buf.byteLength === 0) continue;
-        const count = backend.writeAt(node, buf, position + written);
+        const count = handle.writeAt(buf, position + written);
         written += count;
         if (count < buf.byteLength) break;
       }
@@ -320,25 +328,25 @@ export function bindFSSyscalls(
 
   /** Read into `iovViews` from `position`; returns the bytes read. */
   const readIovecs = (
-    node: FileNode,
+    handle: FileHandle,
     iovViews: Uint8Array[],
     position: number,
   ): number => {
     let totalRead = 0;
     for (const buf of iovViews) {
-      const count = backend.readAt(node, buf, position + totalRead);
+      const count = handle.readAt(buf, position + totalRead);
       totalRead += count;
       if (count < buf.byteLength) break;
     }
     return totalRead;
   };
 
-  /** Release an fd's hold on its node: close stdio, or tell the backend. */
+  /** Release an fd's hold on its node: close stdio, or its file handle. */
   const release = (file: OpenFile): void => {
     if (file.node.type === "character" && file.node.kind === "stdio") {
       file.node.entry.close();
-    } else if (file.node.type === "file") {
-      backend.closeFile(file.node);
+    } else {
+      file.handle?.close();
     }
   };
 
@@ -360,7 +368,7 @@ export function bindFSSyscalls(
       }
       const end = Number(offset) + Number(len);
       if (end > backend.fileSize(file.node)) {
-        return resizeFile(backend, file.node, end);
+        return resizeFile(backend, file.node, file.handle!, end);
       }
       return WASIAbi.WASI_ESUCCESS;
     },
@@ -377,18 +385,16 @@ export function bindFSSyscalls(
     fd_datasync: (fd: number) => {
       const file = getFile(fd);
       if (!file) return WASIAbi.WASI_ERRNO_BADF;
-      if (file.node.type === "file" || file.node.type === "dir") {
-        backend.datasync(file.node);
-      }
+      if (file.node.type === "file") file.handle!.datasync();
+      if (file.node.type === "dir") backend.syncDirectory(file.node);
       return WASIAbi.WASI_ESUCCESS;
     },
 
     fd_sync: (fd: number) => {
       const file = getFile(fd);
       if (!file) return WASIAbi.WASI_ERRNO_BADF;
-      if (file.node.type === "file" || file.node.type === "dir") {
-        backend.sync(file.node);
-      }
+      if (file.node.type === "file") file.handle!.sync();
+      if (file.node.type === "dir") backend.syncDirectory(file.node);
       return WASIAbi.WASI_ESUCCESS;
     },
 
@@ -445,7 +451,7 @@ export function bindFSSyscalls(
       if ((file.rightsBase & RIGHTS.FD_FILESTAT_SET_SIZE) === BIG_ZERO) {
         return WASIAbi.WASI_ERRNO_NOTCAPABLE;
       }
-      return resizeFile(backend, file.node, Number(size));
+      return resizeFile(backend, file.node, file.handle!, Number(size));
     },
 
     fd_filestat_set_times: (
@@ -477,7 +483,7 @@ export function bindFSSyscalls(
       }
       const view = memoryView();
       const iovViews = abi.iovViews(view, iovs, iovsLen);
-      const totalRead = readIovecs(file.node, iovViews, Number(offset));
+      const totalRead = readIovecs(file.handle!, iovViews, Number(offset));
       view.setUint32(nread, totalRead, true);
       return WASIAbi.WASI_ESUCCESS;
     },
@@ -508,7 +514,7 @@ export function bindFSSyscalls(
         return WASIAbi.WASI_ESUCCESS;
       }
       if (position + total > MAX_FILE_SIZE) return WASIAbi.WASI_ERRNO_FBIG;
-      const written = writeIovecs(file.node, iovViews, position);
+      const written = writeIovecs(file.node, file.handle!, iovViews, position);
       view.setUint32(nwritten, written, true);
       return WASIAbi.WASI_ESUCCESS;
     },
@@ -534,7 +540,7 @@ export function bindFSSyscalls(
         return WASIAbi.WASI_ERRNO_NOTCAPABLE;
       }
 
-      const totalRead = readIovecs(file.node, iovViews, file.position);
+      const totalRead = readIovecs(file.handle!, iovViews, file.position);
       file.position += totalRead;
       view.setUint32(nread, totalRead, true);
       return WASIAbi.WASI_ESUCCESS;
@@ -674,7 +680,7 @@ export function bindFSSyscalls(
         return WASIAbi.WASI_ESUCCESS;
       }
       if (position + total > MAX_FILE_SIZE) return WASIAbi.WASI_ERRNO_FBIG;
-      const written = writeIovecs(file.node, iovViews, position);
+      const written = writeIovecs(file.node, file.handle!, iovViews, position);
       file.position = position + written;
       view.setUint32(nwritten, written, true);
       return WASIAbi.WASI_ESUCCESS;
@@ -848,17 +854,18 @@ export function bindFSSyscalls(
 
       const typeMask = node.type === "dir" ? DIRECTORY_RIGHTS : FILE_RIGHTS;
       const rightsBase = fsRightsBase & typeMask;
+      let handle: FileHandle | undefined;
       if (node.type === "file") {
-        backend.openFile(node, {
+        handle = backend.openFile(node, {
           read: (rightsBase & RIGHTS.FD_READ) !== BIG_ZERO,
           write: truncate || (rightsBase & WRITE_RIGHTS) !== BIG_ZERO,
         });
-        // Truncate only once the file is open, so that a backend can hold
-        // its handle for the resize. If the resize fails, nothing holds it.
+        // Truncate through the new handle. If that fails, close the handle,
+        // since no fd will hold it.
         try {
-          if (truncate) resizeFile(backend, node, 0);
+          if (truncate) resizeFile(backend, node, handle, 0);
         } catch (error) {
-          backend.closeFile(node);
+          handle.close();
           throw error;
         }
       }
@@ -866,6 +873,7 @@ export function bindFSSyscalls(
       while (files.has(nextFd)) nextFd++;
       files.set(nextFd, {
         node,
+        handle,
         position: 0,
         fdflags,
         rightsBase,

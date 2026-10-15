@@ -14,18 +14,27 @@ A backend owns two things: the bytes of each file, and persisting changes to the
 
 Every method is synchronous, because the syscalls are synchronous. Finish any asynchronous setup, such as opening storage, before the guest starts.
 
+`FSBackend` has the methods that work without an fd:
+
 | Method | Called for |
 |--------|------------|
 | `fileSize(node)` | `stat`, seeks from the end, appends |
-| `readAt(node, buf, offset)` | `fd_read`, `fd_pread`. Returns the bytes read: fewer than asked only at the end of the file. |
-| `writeAt(node, data, offset)` | `fd_write`, `fd_pwrite`. Returns the bytes written; extends the file and zero-fills any gap. `data` is never empty. |
-| `resize(node, size)` | `fd_filestat_set_size`, `fd_allocate`, `O_TRUNC` |
-| `sync(node)`, `datasync(node)` | `fd_sync`, `fd_datasync`, on a file or a directory |
-| `openFile(node, mode)`, `closeFile(node)` | each fd on a regular file; `mode` says whether the fd can read and write |
+| `openFile(node, mode)` | each new fd on a regular file. Returns the fd's `FileHandle`; `mode` says whether the fd can read and write. |
+| `syncDirectory(dir)` | `fd_sync`, `fd_datasync` on a directory |
 | `createChild(parent, name, node)` | creating a file, directory or symlink |
 | `linkChild(parent, name, node)` | `path_link` |
 | `removeChild(parent, name)` | `path_unlink_file`, `path_remove_directory` |
 | `renameChild(fromParent, fromName, toParent, toName)` | `path_rename` |
+
+A `FileHandle` belongs to one fd, so a backend can keep per-fd state, such as a real file descriptor, in it:
+
+| Method | Called for |
+|--------|------------|
+| `readAt(buf, offset)` | `fd_read`, `fd_pread`. Returns the bytes read: fewer than asked only at the end of the file. |
+| `writeAt(data, offset)` | `fd_write`, `fd_pwrite`. Returns the bytes written; extends the file and zero-fills any gap. `data` is never empty. |
+| `resize(size)` | `fd_filestat_set_size`, `fd_allocate`, `O_TRUNC` |
+| `sync()`, `datasync()` | `fd_sync`, `fd_datasync` |
+| `close()` | `fd_close`, or `fd_renumber` replacing the fd |
 
 See [`src/filesystem/backend.ts`](../src/filesystem/backend.ts) for the exact contract of each method.
 
@@ -55,12 +64,12 @@ For another backend, `content` holds only what the host put there, for example w
 
 ## Open files
 
-`openFile` and `closeFile` are called once for each fd, so two fds on one file give two calls of each. A backend that holds a handle for each file must count them.
+Each fd gets its own `openFile` call and its own handle, and the handle's `close` is called once, when the fd goes away.
 
-`mode.read` and `mode.write` come from the fd's rights when it is opened; `write` is also set when `path_open` truncates. When no open fd on a file has `write`, the syscall layer calls neither `writeAt` nor `resize` for it, so a backend can open such a file read-only. A read-only backend can refuse a write open with `FSError(FSErrno.ROFS)`.
+`mode.read` and `mode.write` come from the fd's rights when it is opened; `write` is also set when `path_open` truncates. The syscall layer calls `writeAt` and `resize` only on a handle opened with `write`, so a backend can open a read-only handle otherwise. A read-only backend can refuse a write open with `FSError(FSErrno.ROFS)`.
 
-`path_open` calls `openFile` before an `O_TRUNC` truncate, so a failed `openFile` leaves the file as it was. If the truncate fails, `path_open` calls `closeFile`. `fd_close` and `fd_renumber` release the fd even if `closeFile` throws.
+`path_open` truncates through the new handle, so a failed `openFile` leaves the file as it was. If the truncate fails, `path_open` closes the handle. `fd_close` and `fd_renumber` release the fd even if `close` throws.
 
 With `O_CREAT`, `path_open` calls `createChild` before `openFile`. If `openFile` then fails, the new file stays, empty and without an fd.
 
-An fd can outlive the name of its file. After an unlink, or a rename that replaces the file, open fds still read and write it. Keep the file's bytes until its last `closeFile`.
+An fd can outlive the name of its file. After an unlink, or a rename that replaces the file, open handles still read and write it. Keep the file's bytes until its last handle closes.

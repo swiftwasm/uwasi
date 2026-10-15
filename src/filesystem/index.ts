@@ -5,7 +5,7 @@ import { bindFSSyscalls } from "./handlers.js";
 import { MemoryFileSystem } from "./namespace.js";
 import { StdioOptions } from "./stdio.js";
 
-export { FSBackend, OpenMode } from "./backend.js";
+export { FileHandle, FSBackend, OpenMode } from "./backend.js";
 export { FSError } from "./error.js";
 export {
   DirectoryNode,
