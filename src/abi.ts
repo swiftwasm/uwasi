@@ -145,6 +145,10 @@ export class WASIAbi {
    */
   static readonly WASI_ERRNO_PERM = 63;
   /**
+   * Read-only file system.
+   */
+  static readonly WASI_ERRNO_ROFS = 69;
+  /**
    * Not a socket.
    */
   static readonly WASI_ERRNO_NOTSOCK = 57;

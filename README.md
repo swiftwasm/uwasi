@@ -127,7 +127,27 @@ const wasi = new WASI({
 });
 ```
 
-`useMemoryFS` accepts the same option through `withStdio`. There, the preopened directories take fd 3 upward, because wasi-libc stops looking for preopens at the first fd that isn't one. Extra fds must be numbered above them, e.g. from 4 with the default single `/` preopen; a clash throws a `RangeError`.
+`useMemoryFS` and `useFS` accept the same option through `withStdio`. There, the preopened directories take fd 3 upward, because wasi-libc stops looking for preopens at the first fd that isn't one. Extra fds must be numbered above them, e.g. from 4 with the default single `/` preopen; a clash throws a `RangeError`.
+
+### With a custom filesystem backend
+
+`useFS` serves the filesystem syscalls from a storage backend that you supply. uwasi keeps path resolution, rights, file descriptors and guest memory. The backend stores file bytes and applies namespace changes. `useMemoryFS` is `useFS` with the built-in `MemoryFSBackend`.
+
+```js
+import { WASI, useFS } from "uwasi";
+import { MemoryFileSystem, MemoryFSBackend } from "uwasi/filesystem";
+
+const fileSystem = new MemoryFileSystem({ "/": "/" });
+const wasi = new WASI({
+    features: [useFS({
+        // Any object that implements FSBackend.
+        withBackend: new MemoryFSBackend(fileSystem),
+        withFileSystem: fileSystem,
+    })],
+});
+```
+
+A backend implements the synchronous `FSBackend` interface from `uwasi/filesystem`, and reports a storage failure by throwing `FSError`. See [Filesystem backends](docs/filesystem-backends.md) for the contract.
 
 ### With `poll_oneoff` and `sched_yield` enabled
 
@@ -196,7 +216,7 @@ worker threads need no special setup.
 43 of the 46 WASI preview1 functions are implemented (the three
 socket-transfer calls are deliberately absent — preview1 sockets are
 vestigial and were replaced wholesale in preview2). The filesystem surface
-is provided by `useMemoryFS` and validated against the full
+is provided by `useMemoryFS` (or `useFS` with another backend) and validated against the full
 [wasi-testsuite](https://github.com/WebAssembly/wasi-testsuite) with zero
 skipped cases; `useStdio` provides the stdio subset only.
 
@@ -206,14 +226,14 @@ skipped cases; `useStdio` provides the stdio subset only.
 | `clock_res_get` / `clock_time_get` | ✅ | CPU-time clocks are approximated by the monotonic clock |
 | `environ_get` / `environ_sizes_get` | ✅ | |
 | `fd_advise` | ✅ | Validates the advice; otherwise a no-op |
-| `fd_allocate` | ✅ | Grows the file to `offset + len`, never shrinks |
+| `fd_allocate` | ✅ | Rights-checked; grows the file to `offset + len`, never shrinks |
 | `fd_close` | ✅ | Preopens are closable |
-| `fd_datasync` / `fd_sync` | ✅ | No-op success (memory is always "synced") |
+| `fd_datasync` / `fd_sync` | ✅ | Passed to the backend; no-op success for memory |
 | `fd_fdstat_get` | ✅ | Reports real per-fd flags and rights |
 | `fd_fdstat_set_flags` | ✅ | `APPEND` honored by `fd_write` |
 | `fd_fdstat_set_rights` | ✅ | Rights may only shrink (`NOTCAPABLE` otherwise) |
 | `fd_filestat_get` | ✅ | Stable per-node inodes, real sizes and timestamps |
-| `fd_filestat_set_size` | ✅ | Zero-fills growth |
+| `fd_filestat_set_size` | ✅ | Rights-checked; zero-fills growth |
 | `fd_filestat_set_times` | ✅ | Validates `fstflags` combinations |
 | `fd_pread` / `fd_pwrite` | ✅ | Positional; never move the cursor; `pwrite` ignores `APPEND` |
 | `fd_prestat_get` / `fd_prestat_dir_name` | ✅ | |
