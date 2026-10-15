@@ -21,7 +21,7 @@ Every method is synchronous, because the syscalls are synchronous. Finish any as
 | `writeAt(node, data, offset)` | `fd_write`, `fd_pwrite`. Returns the bytes written; extends the file and zero-fills any gap. `data` is never empty. |
 | `resize(node, size)` | `fd_filestat_set_size`, `fd_allocate`, `O_TRUNC` |
 | `sync(node)`, `datasync(node)` | `fd_sync`, `fd_datasync`, on a file or a directory |
-| `openFile(node)`, `closeFile(node)` | each fd on a regular file |
+| `openFile(node, mode)`, `closeFile(node)` | each fd on a regular file; `mode` says whether the fd can read and write |
 | `createChild(parent, name, node)` | creating a file, directory or symlink |
 | `linkChild(parent, name, node)` | `path_link` |
 | `removeChild(parent, name)` | `path_unlink_file`, `path_remove_directory` |
@@ -56,6 +56,8 @@ For another backend, `content` holds only what the host put there, for example w
 ## Open files
 
 `openFile` and `closeFile` are called once for each fd, so two fds on one file give two calls of each. A backend that holds a handle for each file must count them.
+
+`mode.read` and `mode.write` come from the fd's rights when it is opened; `write` is also set when `path_open` truncates. When no open fd on a file has `write`, the syscall layer calls neither `writeAt` nor `resize` for it, so a backend can open such a file read-only. A read-only backend can refuse a write open with `FSError(FSErrno.ROFS)`.
 
 `path_open` calls `openFile` before an `O_TRUNC` truncate, so a failed `openFile` leaves the file as it was. If the truncate fails, `path_open` calls `closeFile`. `fd_close` and `fd_renumber` release the fd even if `closeFile` throws.
 

@@ -5,7 +5,7 @@ import { bindFSSyscalls } from "./handlers.js";
 import { MemoryFileSystem } from "./namespace.js";
 import { StdioOptions } from "./stdio.js";
 
-export { FSBackend } from "./backend.js";
+export { FSBackend, OpenMode } from "./backend.js";
 export { FSError } from "./error.js";
 export {
   DirectoryNode,
@@ -24,6 +24,7 @@ export const FSErrno = {
   NOTSUP: WASIAbi.WASI_ERRNO_NOTSUP,
   INVAL: WASIAbi.WASI_ERRNO_INVAL,
   FBIG: WASIAbi.WASI_ERRNO_FBIG,
+  ROFS: WASIAbi.WASI_ERRNO_ROFS,
 } as const;
 
 /**

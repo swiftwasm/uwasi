@@ -1,6 +1,21 @@
 import { DirectoryNode, FileNode, FSNode } from "./namespace.js";
 
 /**
+ * What an fd may do to its file, from its rights when it is opened. Rights
+ * can only shrink later, so this is an upper bound.
+ */
+export interface OpenMode {
+  /** The fd can read the file. */
+  read: boolean;
+  /**
+   * The fd can write or resize the file, or `path_open` truncates it. When
+   * no open fd on a file has `write`, the syscall layer calls neither
+   * `writeAt` nor `resize` for it.
+   */
+  write: boolean;
+}
+
+/**
  * The storage behind the filesystem syscalls.
  *
  * The syscall layer owns path resolution, rights, the fd table, seek
@@ -66,13 +81,16 @@ export interface FSBackend {
   datasync(node: FileNode | DirectoryNode): void;
 
   /**
-   * A new fd refers to the file. There is one call for each fd, so two fds
-   * on one file give two calls. A backend that holds a handle for each file
-   * must count them. `path_open` calls this before it truncates the file.
+   * A new fd refers to the file, with what it may do in `mode`. A backend
+   * that cannot write, for example a read-only store, can refuse a write
+   * open here with `FSError(ROFS)`. There is one call for each fd, so two
+   * fds on one file give two calls. A backend that holds a handle for each
+   * file must count them. `path_open` calls this before it truncates the
+   * file.
    * If this throws after `path_open` created the file, the file stays,
    * empty and without an fd.
    */
-  openFile(node: FileNode): void;
+  openFile(node: FileNode, mode: OpenMode): void;
 
   /**
    * An fd that refers to the file closed. There is one call for each

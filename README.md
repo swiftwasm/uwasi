@@ -225,14 +225,14 @@ skipped cases; `useStdio` provides the stdio subset only.
 | `clock_res_get` / `clock_time_get` | ✅ | CPU-time clocks are approximated by the monotonic clock |
 | `environ_get` / `environ_sizes_get` | ✅ | |
 | `fd_advise` | ✅ | Validates the advice; otherwise a no-op |
-| `fd_allocate` | ✅ | Grows the file to `offset + len`, never shrinks |
+| `fd_allocate` | ✅ | Rights-checked; grows the file to `offset + len`, never shrinks |
 | `fd_close` | ✅ | Preopens are closable |
 | `fd_datasync` / `fd_sync` | ✅ | Passed to the backend; no-op success for memory |
 | `fd_fdstat_get` | ✅ | Reports real per-fd flags and rights |
 | `fd_fdstat_set_flags` | ✅ | `APPEND` honored by `fd_write` |
 | `fd_fdstat_set_rights` | ✅ | Rights may only shrink (`NOTCAPABLE` otherwise) |
 | `fd_filestat_get` | ✅ | Stable per-node inodes, real sizes and timestamps |
-| `fd_filestat_set_size` | ✅ | Zero-fills growth |
+| `fd_filestat_set_size` | ✅ | Rights-checked; zero-fills growth |
 | `fd_filestat_set_times` | ✅ | Validates `fstflags` combinations |
 | `fd_pread` / `fd_pwrite` | ✅ | Positional; never move the cursor; `pwrite` ignores `APPEND` |
 | `fd_prestat_get` / `fd_prestat_dir_name` | ✅ | |

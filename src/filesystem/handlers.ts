@@ -69,6 +69,9 @@ const FILE_RIGHTS =
   RIGHTS.FD_FILESTAT_SET_SIZE |
   RIGHTS.FD_FILESTAT_SET_TIMES |
   RIGHTS.POLL_FD_READWRITE;
+/** The rights that let an fd change a file's contents or size. */
+const WRITE_RIGHTS =
+  RIGHTS.FD_WRITE | RIGHTS.FD_ALLOCATE | RIGHTS.FD_FILESTAT_SET_SIZE;
 /** Rights that make sense on a directory fd (seek/tell/write-shaped rights are dropped). */
 const DIRECTORY_RIGHTS =
   ALL_RIGHTS ^
@@ -348,6 +351,9 @@ export function bindFSSyscalls(
       if (!file) return WASIAbi.WASI_ERRNO_BADF;
       if (file.node.type === "dir") return WASIAbi.WASI_ERRNO_ISDIR;
       if (file.node.type !== "file") return WASIAbi.WASI_ERRNO_NOTSUP;
+      if ((file.rightsBase & RIGHTS.FD_ALLOCATE) === BIG_ZERO) {
+        return WASIAbi.WASI_ERRNO_NOTCAPABLE;
+      }
       const end = Number(offset) + Number(len);
       if (end > backend.fileSize(file.node)) {
         return resizeFile(backend, file.node, end);
@@ -432,6 +438,9 @@ export function bindFSSyscalls(
       const file = getFile(fd);
       if (!file) return WASIAbi.WASI_ERRNO_BADF;
       if (file.node.type !== "file") return WASIAbi.WASI_ERRNO_INVAL;
+      if ((file.rightsBase & RIGHTS.FD_FILESTAT_SET_SIZE) === BIG_ZERO) {
+        return WASIAbi.WASI_ERRNO_NOTCAPABLE;
+      }
       return resizeFile(backend, file.node, Number(size));
     },
 
@@ -833,8 +842,13 @@ export function bindFSSyscalls(
         node = created;
       }
 
+      const typeMask = node.type === "dir" ? DIRECTORY_RIGHTS : FILE_RIGHTS;
+      const rightsBase = fsRightsBase & typeMask;
       if (node.type === "file") {
-        backend.openFile(node);
+        backend.openFile(node, {
+          read: (rightsBase & RIGHTS.FD_READ) !== BIG_ZERO,
+          write: truncate || (rightsBase & WRITE_RIGHTS) !== BIG_ZERO,
+        });
         // Truncate only once the file is open, so that a backend can hold
         // its handle for the resize. If the resize fails, nothing holds it.
         try {
@@ -845,13 +859,12 @@ export function bindFSSyscalls(
         }
       }
 
-      const typeMask = node.type === "dir" ? DIRECTORY_RIGHTS : FILE_RIGHTS;
       while (files.has(nextFd)) nextFd++;
       files.set(nextFd, {
         node,
         position: 0,
         fdflags,
-        rightsBase: fsRightsBase & typeMask,
+        rightsBase,
         rightsInheriting:
           node.type === "dir"
             ? fsRightsInheriting

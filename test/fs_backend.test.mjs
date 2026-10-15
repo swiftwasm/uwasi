@@ -22,6 +22,9 @@ import {
 } from "./syscall_harness.mjs";
 
 const ESUCCESS = 0;
+// fd rights: FD_READ, FD_SEEK, FD_TELL and FD_FILESTAT_GET; or FD_WRITE.
+const READ_RIGHTS = (1n << 1n) | (1n << 2n) | (1n << 5n) | (1n << 21n);
+const WRITE_RIGHTS = 1n << 6n;
 const { WASI_ERRNO_IO: IO, WASI_ERRNO_NOSPC: NOSPC } = WASIAbi;
 
 /** A memory backend that records the calls the syscall layer makes. */
@@ -114,6 +117,42 @@ describe("FSBackend seam", () => {
       written: 0,
     });
     assert.equal(tell(h, fd), 0n);
+  });
+
+  it("tells openFile whether the fd can read and write", () => {
+    const { backend, h } = setup();
+    const modes = [];
+    const openFile = backend.openFile.bind(backend);
+    backend.openFile = (node, mode) => {
+      modes.push(mode);
+      return openFile(node, mode);
+    };
+    const TRUNC = WASIAbi.WASI_OFLAGS_TRUNC;
+    assert.equal(sysClose(h, sysCreate(h, "file").fd), ESUCCESS);
+    for (const [oflags, rights] of [
+      [0, READ_RIGHTS],
+      [0, WRITE_RIGHTS],
+      [TRUNC, READ_RIGHTS],
+    ]) {
+      assert.equal(sysClose(h, sysOpen(h, "file", oflags, rights).fd), 0);
+    }
+    assert.deepEqual(modes, [
+      { read: true, write: true },
+      { read: true, write: false },
+      { read: false, write: true },
+      { read: true, write: true },
+    ]);
+  });
+
+  it("resizes only through an fd with the right to", () => {
+    const { backend, h } = setup();
+    assert.equal(sysClose(h, sysCreate(h, "file").fd), ESUCCESS);
+    const { fd } = sysOpen(h, "file", 0, READ_RIGHTS);
+    backend.calls.length = 0;
+    const NOTCAPABLE = WASIAbi.WASI_ERRNO_NOTCAPABLE;
+    assert.equal(h.imports.fd_filestat_set_size(fd, 4n), NOTCAPABLE);
+    assert.equal(h.imports.fd_allocate(fd, 0n, 4n), NOTCAPABLE);
+    assert.deepEqual(backend.calls, []);
   });
 
   it("calls openFile and closeFile once for each fd", () => {

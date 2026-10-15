@@ -34,7 +34,7 @@ function putPath(h, name, ptr = PATH_PTR) {
   return path.length;
 }
 
-export function sysOpen(h, name, oflags = 0) {
+export function sysOpen(h, name, oflags = 0, rights = ALL_RIGHTS) {
   const len = putPath(h, name);
   const errno = h.imports.path_open(
     PREOPEN_FD,
@@ -42,8 +42,8 @@ export function sysOpen(h, name, oflags = 0) {
     PATH_PTR,
     len,
     oflags,
-    ALL_RIGHTS,
-    ALL_RIGHTS,
+    rights,
+    rights,
     0,
     OUT_PTR,
   );

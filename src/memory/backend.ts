@@ -1,5 +1,5 @@
 import { WASIAbi } from "../abi.js";
-import { FSBackend } from "../filesystem/backend.js";
+import { FSBackend, OpenMode } from "../filesystem/backend.js";
 import { resizeContent } from "../filesystem/content.js";
 import { FSError } from "../filesystem/error.js";
 import { DirectoryNode, FileNode, FSNode } from "../filesystem/namespace.js";
@@ -45,7 +45,7 @@ export class MemoryFSBackend implements FSBackend {
 
   datasync(_node: FileNode | DirectoryNode): void {}
 
-  openFile(_node: FileNode): void {}
+  openFile(_node: FileNode, _mode: OpenMode): void {}
 
   closeFile(_node: FileNode): void {}
 
