@@ -63,7 +63,7 @@ export function useMemoryFS(
     const fileSystem =
       useOptions.withFileSystem || new MemoryFileSystem(wasiOptions.preopens);
     return useFS({
-      withBackend: new MemoryFSBackend(),
+      withBackend: new MemoryFSBackend(fileSystem),
       withFileSystem: fileSystem,
       withStdio: useOptions.withStdio,
     })(wasiOptions, abi, memoryView);

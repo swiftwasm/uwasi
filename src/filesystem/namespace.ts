@@ -1,6 +1,6 @@
 import { WASIAbi } from "../abi.js";
 import { FdEntry } from "./stdio.js";
-import { isResizable, ownBuffers } from "./content.js";
+import { isResizable, resizeContent } from "./content.js";
 
 export interface NodeMeta {
   ino: bigint;
@@ -68,11 +68,6 @@ export function makeFile(fs: MemoryFileSystem, content: Uint8Array): FileNode {
   if (isResizable(content.buffer)) {
     content = new Uint8Array(content);
   }
-  // `lookup` returns the live view, so a caller can build a second file on a
-  // buffer the first one owns. Disown it instead of copying: whoever grows
-  // first then takes a fresh buffer, and neither can write over the other's
-  // bytes by reusing spare room or zeroing after a shrink.
-  ownBuffers.delete(content.buffer);
   return fs.stamp({ type: "file" as const, content, nlink: 1 });
 }
 export function makeSymlink(fs: MemoryFileSystem, target: string): SymlinkNode {
@@ -189,6 +184,8 @@ type FileContent = string | Uint8Array | Blob;
 export class MemoryFileSystem {
   /** The next inode number; each filesystem counts its own. */
   private nextIno = 1;
+  /** Buffers this filesystem allocated, whose spare room is safe to grow into. */
+  private ownBuffers = new WeakSet<ArrayBufferLike>();
   private root: DirectoryNode;
   private preopenPaths: string[] = [];
 
@@ -237,15 +234,38 @@ export class MemoryFileSystem {
   }
 
   /**
-   * Creates a file with the specified content.
+   * Creates a file with the specified content. The file uses `content`
+   * itself, without a copy.
+   *
+   * To create a file from another `MemoryFileSystem`'s file, pass a copy,
+   * such as `other.lookup(path).content.slice()`. Each filesystem knows
+   * only its own buffers, so if two filesystems share one, a resize in one
+   * can overwrite the other's bytes.
    * @param path Path where the file should be created
    * @param content Binary content of the file
    * @returns The created file node
    */
   createFile(path: string, content: Uint8Array): FileNode {
     const fileNode = makeFile(this, content);
+    // `lookup` returns the live view, so a caller can build a second file on
+    // a buffer the first one owns. Disown it instead of copying: whoever
+    // grows first then takes a fresh buffer, and neither can write over the
+    // other's bytes by reusing spare room or zeroing after a shrink.
+    this.ownBuffers.delete(fileNode.content.buffer);
     this.setNode(path, fileNode);
     return fileNode;
+  }
+
+  /**
+   * Resizes a file's in-memory content to `size` bytes, zero-filling any
+   * growth. It grows into spare room in buffers this filesystem allocated,
+   * so many small appends do not copy the whole file each time.
+   * @param node The file
+   * @param size The new size, in bytes
+   * @throws RangeError if the engine cannot allocate that much
+   */
+  resizeContent(node: FileNode, size: number): void {
+    node.content = resizeContent(node.content, size, this.ownBuffers);
   }
 
   /**

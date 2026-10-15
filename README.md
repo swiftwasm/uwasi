@@ -137,11 +137,12 @@ const wasi = new WASI({
 import { WASI, useFS } from "uwasi";
 import { MemoryFileSystem, MemoryFSBackend } from "uwasi/filesystem";
 
+const fileSystem = new MemoryFileSystem({ "/": "/" });
 const wasi = new WASI({
     features: [useFS({
         // Any object that implements FSBackend.
-        withBackend: new MemoryFSBackend(),
-        withFileSystem: new MemoryFileSystem({ "/": "/" }),
+        withBackend: new MemoryFSBackend(fileSystem),
+        withFileSystem: fileSystem,
     })],
 });
 ```

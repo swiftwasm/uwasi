@@ -50,7 +50,7 @@ The syscall layer recognizes `FSError` by its class. Import it from the same cop
 
 The syscall layer checks the request before it calls the backend: the target exists or not, a directory is empty, a directory does not move into itself. It updates `nlink` only after the backend call succeeds. A backend without hard links throws `FSError(FSErrno.NOTSUP)` from `linkChild`.
 
-The host-side helpers on `MemoryFileSystem`, such as `addFile` and `removeEntry`, change only the in-memory tree. They do not call the backend.
+The host-side helpers on `MemoryFileSystem`, such as `addFile` and `removeEntry`, change only the in-memory tree. They do not call the backend. `createFile` keeps the buffer it is given, without a copy, so to create a file from another filesystem's file, pass a copy of its content.
 
 ## File contents
 

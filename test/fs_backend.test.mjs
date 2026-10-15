@@ -58,8 +58,9 @@ class RecordingBackend extends MemoryFSBackend {
   }
 }
 
-function setup(backend = new RecordingBackend()) {
+function setup() {
   const fs = new MemoryFileSystem({ "/": "/" });
+  const backend = new RecordingBackend(fs);
   return { backend, fs, h: bindImports(backend, fs) };
 }
 
@@ -227,7 +228,7 @@ describe("FSBackend seam", () => {
   it("keeps the file contents when openFile fails before a truncate", () => {
     const fs = new MemoryFileSystem({ "/": "/" });
     fs.addFile("/file", "valuable data");
-    const backend = new MemoryFSBackend();
+    const backend = new MemoryFSBackend(fs);
     backend.openFile = () => {
       throw new FSError(IO);
     };
@@ -407,7 +408,7 @@ describe("useFS and uwasi/filesystem", () => {
       preopens: { "/ignored": "/" },
       features: [
         useFS({
-          withBackend: new filesystem.MemoryFSBackend(),
+          withBackend: new filesystem.MemoryFSBackend(fileSystem),
           withFileSystem: fileSystem,
         }),
       ],
@@ -438,8 +439,8 @@ describe("useFS and uwasi/filesystem", () => {
 
 describe("MemoryFSBackend", () => {
   it("writes and resizes with zero fill, and reads short at the end", () => {
-    const backend = new filesystem.MemoryFSBackend();
     const fs = new filesystem.MemoryFileSystem();
+    const backend = new filesystem.MemoryFSBackend(fs);
     const file = fs.createFile("/bytes", new Uint8Array([1, 2, 3]));
     const handle = backend.openFile(file, { read: true, write: true });
     const read = () => {

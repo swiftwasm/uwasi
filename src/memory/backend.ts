@@ -1,15 +1,22 @@
 import { WASIAbi } from "../abi.js";
 import { FileHandle, FSBackend, OpenMode } from "../filesystem/backend.js";
-import { resizeContent } from "../filesystem/content.js";
 import { FSError } from "../filesystem/error.js";
-import { DirectoryNode, FileNode, FSNode } from "../filesystem/namespace.js";
+import {
+  DirectoryNode,
+  FileNode,
+  FSNode,
+  MemoryFileSystem,
+} from "../filesystem/namespace.js";
 
 /**
  * A handle on a file whose bytes live in `FileNode.content`. It holds the
  * node, so an unlinked file stays readable until the handle closes.
  */
 class MemoryFileHandle implements FileHandle {
-  constructor(private readonly node: FileNode) {}
+  constructor(
+    private readonly fileSystem: MemoryFileSystem,
+    private readonly node: FileNode,
+  ) {}
 
   readAt(buf: Uint8Array, offset: number): number {
     const data = this.node.content;
@@ -28,7 +35,7 @@ class MemoryFileHandle implements FileHandle {
 
   resize(size: number): void {
     try {
-      this.node.content = resizeContent(this.node.content, size);
+      this.fileSystem.resizeContent(this.node, size);
     } catch (error) {
       // A guest chooses the size, so it can ask for more than the engine
       // will allocate. For a filesystem in memory, that is a full disk.
@@ -49,14 +56,18 @@ class MemoryFileHandle implements FileHandle {
 /**
  * The in-memory backend. File bytes live in `FileNode.content`, and the
  * namespace is the node tree itself, so there is nothing to make durable.
+ * Pass the same `MemoryFileSystem` that `useFS` gets: it keeps track of the
+ * buffers it can grow in place.
  */
 export class MemoryFSBackend implements FSBackend {
+  constructor(private readonly fileSystem: MemoryFileSystem) {}
+
   fileSize(node: FileNode): number {
     return node.content.byteLength;
   }
 
   openFile(node: FileNode, _mode: OpenMode): FileHandle {
-    return new MemoryFileHandle(node);
+    return new MemoryFileHandle(this.fileSystem, node);
   }
 
   syncDirectory(_dir: DirectoryNode): void {}

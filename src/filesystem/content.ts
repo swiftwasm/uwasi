@@ -3,17 +3,19 @@ export function isResizable(buffer: ArrayBufferLike): boolean {
   return (buffer as { resizable?: boolean }).resizable === true;
 }
 
-/** Buffers allocated here, whose spare room is safe to grow into. */
-export const ownBuffers = new WeakSet<ArrayBufferLike>();
-
-/** Spare room after `data` in a buffer this module owns, or 0. */
-function ownCapacity(data: Uint8Array): number {
-  if (!ownBuffers.has(data.buffer) || data.byteOffset !== 0) return 0;
+/** Spare room after `data` in a buffer in `owned`, or 0. */
+function ownCapacity(
+  data: Uint8Array,
+  owned: WeakSet<ArrayBufferLike>,
+): number {
+  if (!owned.has(data.buffer) || data.byteOffset !== 0) return 0;
   return data.buffer.byteLength;
 }
 
 /**
  * Return a `Uint8Array` of `newSize` bytes holding as much of `data` as fits.
+ * `owned` holds the buffers this allocated before, whose spare room is safe
+ * to grow into; a buffer this allocates now joins it.
  *
  * Files are stored in a buffer with room to spare, and the view describes only
  * the part in use. An append then re-views the same buffer instead of copying
@@ -27,10 +29,14 @@ function ownCapacity(data: Uint8Array): number {
  * buffer needs no such guard, so nothing has to be copied before an embedder
  * reads it.
  */
-export function resizeContent(data: Uint8Array, newSize: number): Uint8Array {
+export function resizeContent(
+  data: Uint8Array,
+  newSize: number,
+  owned: WeakSet<ArrayBufferLike>,
+): Uint8Array {
   if (data.byteLength === newSize) return data;
 
-  const capacity = ownCapacity(data);
+  const capacity = ownCapacity(data, owned);
 
   // Growing into spare room. Zero what a previous shrink may have left there.
   // Past roughly a doubling a fresh buffer is cheaper: its pages arrive zeroed.
@@ -54,7 +60,7 @@ export function resizeContent(data: Uint8Array, newSize: number): Uint8Array {
       ? newSize
       : Math.max(newSize, data.byteLength * 2),
   );
-  ownBuffers.add(buffer);
+  owned.add(buffer);
   const next = new Uint8Array(buffer, 0, newSize);
   next.set(newSize < data.byteLength ? data.subarray(0, newSize) : data);
   return next;
