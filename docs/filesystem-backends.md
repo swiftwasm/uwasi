@@ -73,3 +73,62 @@ Each fd gets its own `openFile` call and its own handle, and the handle's `close
 With `O_CREAT`, `path_open` calls `createChild` before `openFile`. If `openFile` then fails, the new file stays, empty and without an fd.
 
 An fd can outlive the name of its file. After an unlink, or a rename that replaces the file, open handles still read and write it. Keep the file's bytes until its last handle closes.
+
+## The OPFS backend
+
+`uwasi/opfs` exports `OPFSBackend`, which implements `FSBackend` over the Origin Private File System, and `useOPFS`, which is `useFS` with that backend and its namespace. The OPFS code imports the core only through `src/filesystem/index.ts`, the source of `uwasi/filesystem`, so it uses nothing that another backend could not.
+
+`OPFSBackend.create(directory, options)` is asynchronous: it opens the store, rebuilds the namespace and opens a sync access handle for every data file. Create it before the guest starts. `settle()`, `persistAll()` and `close()` are also asynchronous, and run between guest calls.
+
+Limits:
+
+- Sync access handles exist only in workers, and each is an exclusive lock, so a store has one live backend at a time.
+- Hard links return `NOTSUP`: the namespace record maps each data file to one name. Links, renames and removals of device nodes such as `/dev/null` also return `NOTSUP`, because the runtime recreates them at every start.
+- Inode numbers and timestamps are not persisted.
+- `create()` refuses a store whose namespace it cannot read, and leaves it unchanged (see [Namespace record](#namespace-record)).
+- Opening a file writes nothing to storage. A host-seeded file that `persistAll()` has not saved is copied into OPFS on its first write or sync, which can return `NOSPC` on a full store. Call `persistAll()` after seeding.
+
+Each namespace change appends one record to a change log and flushes it, so its cost does not grow with the namespace. Periodic compaction rewrites the whole tree, amortized over the changes before it.
+
+The OPFS tests run against an in-memory mock of the OPFS API. They check the backend's logic, including crash recovery in the mock, but not the durability of a real browser.
+
+## Sizing the OPFS spare pool
+
+Guest syscalls are synchronous, but creating an OPFS file is not. The backend bridges the two with a pool of pre-created, empty data files, each held open: a guest file create claims one synchronously. When a guest call creates more files than the pool holds, the excess files _overdraft_:
+
+- Their names are recorded durably as usual, but their bytes stay in memory until the backend creates their data files in the background.
+- `fd_sync` and `fd_datasync` on them return `NOSPC` until then.
+- A crash before that happens leaves those names mapped to empty files.
+
+Background work (creating overdrafted files and refilling the pool) runs only when the event loop gets a turn, which means between guest calls, never during one. A host that starts the next guest call as soon as the last returns, for example from a message handler, may never let it finish.
+
+A host controls this with two things:
+
+- **`spareFiles`** (default 16) sets the pool size. Set it to at least the number of spares one guest call claims; files beyond it overdraft. A call claims one spare per file it creates and per host-seeded file it first writes to or syncs. A snapshot of the namespace (every compaction, and any change no log record can express, such as renaming a seeded file) also claims one for every reachable seeded file not yet persisted; `persistAll()` after seeding avoids that. A failed create's spare waits in quarantine until the next snapshot succeeds, since the failed record may still name it. Each spare is an open sync access handle on an empty data file, created at `create()`, so a large pool costs open time and handles. In one Chromium measurement, 1,024 spares added about 130 ms to `create()`.
+- **`await backend.settle()`** waits for the background work: overdrafted files get their data files and the pool is refilled to `spareFiles`. Await it between guest calls whenever files created so far should survive a crash, and before a call that will create many files. It costs time proportional to the files created since the last settle. Guest calls may still run while it waits, and it waits for the work they queue too: it resolves once no work is queued or running and no file is waiting for its data file, so no file reachable at that point still waits for one. A guest that keeps creating files past the pool during every wait can delay it indefinitely. It rejects as soon as storage refuses any of that work; the files it left keep their bytes in memory, and the next `settle()` retries. `persistAll()` waits the same way, then flushes every reachable file.
+
+With `spareFiles` at least the largest burst and `settle()` between calls, no file overdrafts. Without `settle()`, a large pool helps only the first call, since the refill may not finish before the next. A single call that creates more files than the pool always overdrafts the excess; await `settle()` after it to make them durable. `close()` also finishes the background work and flushes every file, so a clean shutdown keeps every file's bytes, overdrafted ones included; if storage refuses any of it, `close()` still releases every handle, then rejects, since those bytes may be lost. (Seeded files that nothing has recorded yet are not saved by `close()`; see `persistAll()`.)
+
+Fewer, larger files avoid the problem altogether: each file costs a spare, while bytes written to an existing file do not.
+
+## Namespace record
+
+The OPFS backend persists guest names separately from file content. Each `.uwasi.data.<id>` file holds one guest file's bytes; the namespace record maps names to those ids. It is a sequence of binary records over directory ids and data-file ids:
+
+| Record    | Fields                               |
+| --------- | ------------------------------------ |
+| `MKDIR`   | parent dir, name, new dir id         |
+| `FILE`    | parent dir, name, data-file id       |
+| `SYMLINK` | parent dir, name, target             |
+| `REMOVE`  | parent dir, name                     |
+| `RENAME`  | from dir, from name, to dir, to name |
+
+Ids are LEB128 varints and names are length-prefixed UTF-8. The root directory is id 0. A snapshot is the `MKDIR`, `FILE`, and `SYMLINK` records that rebuild the tree from an empty root, in `entries` order, so re-init preserves directory listing order. Snapshots alternate between `.uwasi.meta.0` and `.uwasi.meta.1`, each framed as `"UWS2" | u32 body length | u32 checksum | body`, where the body is a varint generation followed by the records and the checksum is FNV-1a over the first 8 bytes (magic and length) continued over the body. Re-init loads the highest intact generation. A slot whose length or checksum does not verify is torn, and re-init falls back to the other one. A slot that verifies but that this version cannot read, under an unknown magic or as a `"UWS2"` body that does not decode, is intact: no torn write passes the checksum, since it covers the header. It may hold the newest namespace, so `create()` rejects without changing the store rather than fall back or open it as empty. So it does for a magic of four nonzero bytes it does not know, even if the checksum fails: a torn write of a known magic leaves a known magic or a zero byte, never that.
+
+Changes after a snapshot go to `.uwasi.meta.log`, one record per namespace change, appended and flushed before the syscall returns. The log header is `"UWL2" | u32 check | u64 generation`: it names the snapshot generation the log builds on, and its check is FNV-1a over the magic continued over the generation. As for a snapshot slot, a header that verifies under a magic this version does not know, or that has an unknown magic of four nonzero bytes, makes `create()` reject. Each frame is `u32 body length | u32 check | record`, where the check is FNV-1a of the record seeded with the generation and the frame's offset, so bytes left over from an earlier generation, or from a frame at another offset, never verify. Re-init replays the log on top of the snapshot it names, stopping at the first frame that does not verify. A frame that verifies was written whole, so if it does not decode to exactly one record, `create()` rejects: stopping there would drop the changes after it for good, since every open compacts. A failed append is truncated away where possible. A complete frame left behind at the end of the log does verify, and may still become durable, so the failed change may take effect after all, which a failed syscall allows.
+
+Every later format of these files must keep their header: a 4-byte magic first, new for any change in format, and a checksum that covers it. That is what lets an older version tell a store it must refuse from one it may recover.
+
+Once the log exceeds both 64 KiB and twice the last snapshot, the backend writes the next snapshot and then resets the log to build on it. A crash between those steps leaves a log naming the older generation, which re-init ignores because the new snapshot already holds its changes. If the reset itself fails, changes are recorded by full snapshots until a later compaction resets the log. If the snapshot fails, the slot may still hold it, and storage may keep it however the write failed, with the same effect. Its generation is not used again in that session and the log takes no further appends, so changes are again recorded by full snapshots (into the same slot) until one succeeds and replaces it. Every `create()` also compacts, so a store opens with an empty log. It counts generations on from the one it loaded, which may reuse a failed snapshot's generation; that is harmless, since a slot it did not load is torn or older, and its first snapshot overwrites that slot.
+
+A failed create can thus leave a record that names a data file the backend has freed. Such a data file stays out of the spare pool until a later snapshot succeeds, since a new file claiming it would make that name show the new file's bytes. Unlink and replacing rename record the change before they destroy any content, so a failed one leaves the file as it was. A data file whose name a durable record already dropped is reused at once: replay forgets it at that record. A directory `fd_sync` flushes nothing, since every guest change was flushed before its syscall returned; it does not record host-seeded files either (see `persistAll()`).
