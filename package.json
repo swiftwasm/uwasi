@@ -12,12 +12,19 @@
     "./filesystem": {
       "import": "./lib/esm/filesystem/index.js",
       "require": "./lib/cjs/filesystem/index.js"
+    },
+    "./opfs": {
+      "import": "./lib/esm/opfs/index.js",
+      "require": "./lib/cjs/opfs/index.js"
     }
   },
   "typesVersions": {
     "*": {
       "filesystem": [
         "lib/cjs/filesystem/index.d.ts"
+      ],
+      "opfs": [
+        "lib/cjs/opfs/index.d.ts"
       ]
     }
   },
