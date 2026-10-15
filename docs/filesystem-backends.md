@@ -4,9 +4,9 @@
 
 ## Who does what
 
-The syscall layer owns path resolution, rights, the fd table, seek positions, link counts and timestamps. It reads guest memory and writes the results.
+The syscall layer owns path resolution, rights, the fd table, seek positions, link counts, timestamps and the live node tree. It reads guest memory and writes the results.
 
-A backend owns two things: the bytes of each file, and the changes to the namespace. It implements `FSBackend` and never sees guest memory or the WASI ABI.
+A backend owns two things: the bytes of each file, and persisting changes to the namespace. It implements `FSBackend` and never sees guest memory or the WASI ABI.
 
 `withFileSystem` is a `MemoryFileSystem`. It is the live namespace: the node tree that path resolution and `fd_readdir` read, and the list of preopened directories. `WASIOptions.preopens` is not used.
 
@@ -37,9 +37,7 @@ The syscall layer recognizes `FSError` by its class. Import it from the same cop
 
 ## Namespace changes
 
-Path resolution reads `DirectoryNode.entries` directly. So `createChild`, `linkChild`, `removeChild` and `renameChild` must update `entries`, as well as any copy that the backend keeps.
-
-If one of them throws, every `entries` it touched must keep the same names, the same node objects and the same order as before. The order is the `fd_readdir` order. The syscall layer does not repair `entries`: a backend that changes the tree and then fails to persist the change must undo the change itself. This is about the live tree only; what survives a crash is up to the backend.
+`createChild`, `linkChild`, `removeChild` and `renameChild` persist a change; they do not apply it. The syscall layer calls them first, so they see the tree as it was, and updates `DirectoryNode.entries` only after they return. If one of them throws, the tree stays as it was, and there is nothing to undo. A backend must not change `entries` itself. What survives a crash is up to the backend.
 
 The syscall layer checks the request before it calls the backend: the target exists or not, a directory is empty, a directory does not move into itself. It updates `nlink` only after the backend call succeeds. A backend without hard links throws `FSError(FSErrno.NOTSUP)` from `linkChild`.
 

@@ -18,6 +18,7 @@ import {
   sysLink,
   sysLstat,
   sysUnlink,
+  sysRename,
 } from "./syscall_harness.mjs";
 
 const ESUCCESS = 0;
@@ -193,10 +194,12 @@ describe("FSBackend seam", () => {
 
 /**
  * A backend that keeps file bytes in its own map, never in
- * `FileNode.content`, and never changes node metadata.
+ * `FileNode.content`, and never changes node metadata or `entries`. Its
+ * namespace methods record the change and the names in place when called.
  */
 class MapBackend {
   bytes = new Map();
+  changes = [];
   #data(node) {
     return this.bytes.get(node) ?? new Uint8Array(0);
   }
@@ -223,19 +226,18 @@ class MapBackend {
   datasync() {}
   openFile() {}
   closeFile() {}
-  createChild(parent, name, node) {
-    parent.entries[name] = node;
+  createChild(parent, name) {
+    this.changes.push(["create", name, Object.keys(parent.entries)]);
   }
-  linkChild(parent, name, node) {
-    parent.entries[name] = node;
+  linkChild(parent, name) {
+    this.changes.push(["link", name, Object.keys(parent.entries)]);
   }
   removeChild(parent, name) {
-    delete parent.entries[name];
+    this.changes.push(["remove", name, Object.keys(parent.entries)]);
   }
   renameChild(fromParent, fromName, toParent, toName) {
-    const node = fromParent.entries[fromName];
-    delete fromParent.entries[fromName];
-    toParent.entries[toName] = node;
+    const names = Object.keys(toParent.entries);
+    this.changes.push(["rename", `${fromName}>${toName}`, names]);
   }
 }
 
@@ -284,6 +286,28 @@ describe("a backend that keeps bytes outside FileNode.content", () => {
       true,
     );
     assert.equal(sysLstat(h, "file").size, 0);
+  });
+
+  it("applies namespace changes itself, after the backend call", () => {
+    const { backend, fs, h } = mapSetup();
+    for (const name of ["a", "b"]) {
+      assert.equal(sysClose(h, sysCreate(h, name).fd), ESUCCESS);
+    }
+    const a = fs.lookup("/a");
+    assert.equal(sysLink(h, "a", "c"), ESUCCESS);
+    assert.equal(sysRename(h, "c", "b"), ESUCCESS);
+    assert.equal(sysUnlink(h, "a"), ESUCCESS);
+    assert.deepEqual(Object.keys(fs.lookup("/").entries), ["dev", "b"]);
+    assert.equal(fs.lookup("/b"), a);
+    assert.equal(sysLstat(h, "b").nlink, 1);
+    // Each call saw the tree as it was before its own change.
+    assert.deepEqual(backend.changes, [
+      ["create", "a", ["dev"]],
+      ["create", "b", ["dev", "a"]],
+      ["link", "c", ["dev", "a", "b"]],
+      ["rename", "c>b", ["dev", "a", "b", "c"]],
+      ["remove", "a", ["dev", "a", "b"]],
+    ]);
   });
 
   it("keeps an unlinked file readable through an open fd", () => {
@@ -363,20 +387,5 @@ describe("MemoryFSBackend", () => {
     backend.resize(file, 1);
     backend.resize(file, 3);
     assert.deepEqual(read(file), [1, 0, 0]);
-  });
-
-  it("applies namespace changes to the live tree", () => {
-    const from = fs.ensureDir("/from");
-    const to = fs.ensureDir("/to");
-    const file = fs.createFile("/scratch", new Uint8Array(0));
-    backend.createChild(from, "a", file);
-    backend.linkChild(to, "b", file);
-    assert.equal(from.entries.a, file);
-    assert.equal(to.entries.b, file);
-    backend.renameChild(from, "a", to, "c");
-    assert.deepEqual(Object.keys(from.entries), []);
-    assert.equal(to.entries.c, file);
-    backend.removeChild(to, "b");
-    assert.deepEqual(Object.keys(to.entries), ["c"]);
   });
 });

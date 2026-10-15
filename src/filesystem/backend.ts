@@ -4,8 +4,9 @@ import { DirectoryNode, FileNode, FSNode } from "./namespace.js";
  * The storage behind the filesystem syscalls.
  *
  * The syscall layer owns path resolution, rights, the fd table, seek
- * positions, link counts and timestamps. A backend owns two things: the
- * bytes of each file, and the changes to the namespace. The syscall layer
+ * positions, link counts, timestamps and the live node tree. A backend owns
+ * two things: the bytes of each file, and persisting namespace changes.
+ * The syscall layer
  * never reads or writes `FileNode.content`; only `MemoryFSBackend` keeps
  * the bytes there.
  *
@@ -15,12 +16,11 @@ import { DirectoryNode, FileNode, FSNode } from "./namespace.js";
  * To report a storage failure, a method throws `FSError` with a WASI errno.
  * The syscall returns that errno to the guest.
  *
- * Path resolution and `fd_readdir` read `DirectoryNode.entries` directly.
- * So the namespace methods must update `entries`, as well as any copy the
- * backend keeps. If a namespace method throws, every `entries` it touched
- * must keep the same names, the same node objects and the same order as
- * before; the order is the `fd_readdir` order. The syscall layer does not
- * repair `entries`.
+ * The namespace methods persist a change; they do not apply it. The
+ * syscall layer calls them before it changes `DirectoryNode.entries`, so
+ * they see the tree as it was, and changes `entries` only after they
+ * return. A namespace method that throws leaves nothing to undo in the
+ * tree. It must not change `entries` itself.
  *
  * An fd can outlive the name of its file. After `removeChild`, or a
  * `renameChild` that replaces the file, open fds still read and write it.
@@ -80,22 +80,23 @@ export interface FSBackend {
    */
   closeFile(node: FileNode): void;
 
-  /** Add `node`, which is new, to `parent` under `name`. */
+  /** Persist adding `node`, which is new, to `parent` under `name`. */
   createChild(parent: DirectoryNode, name: string, node: FSNode): void;
 
   /**
-   * Add `name` in `parent` as another name for `node`, for `path_link`.
+   * Persist adding `name` in `parent` as another name for `node`, for
+   * `path_link`.
    * `node` already has a name, and is not a directory. A backend without
    * hard links throws `FSError` with `NOTSUP`.
    */
   linkChild(parent: DirectoryNode, name: string, node: FSNode): void;
 
-  /** Remove `name` from `parent`. */
+  /** Persist removing `name` from `parent`. */
   removeChild(parent: DirectoryNode, name: string): void;
 
   /**
-   * Move the node at `fromName` in `fromParent` to `toName` in `toParent`.
-   * Replace any node that is already at `toName`.
+   * Persist moving the node at `fromName` in `fromParent` to `toName` in
+   * `toParent`, replacing any node that is already at `toName`.
    */
   renameChild(
     fromParent: DirectoryNode,

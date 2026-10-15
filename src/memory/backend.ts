@@ -49,26 +49,18 @@ export class MemoryFSBackend implements FSBackend {
 
   closeFile(_node: FileNode): void {}
 
-  createChild(parent: DirectoryNode, name: string, node: FSNode): void {
-    parent.entries[name] = node;
-  }
+  // The syscall layer applies namespace changes to the node tree, which is
+  // all the namespace there is, so there is nothing to persist.
+  createChild(_parent: DirectoryNode, _name: string, _node: FSNode): void {}
 
-  linkChild(parent: DirectoryNode, name: string, node: FSNode): void {
-    parent.entries[name] = node;
-  }
+  linkChild(_parent: DirectoryNode, _name: string, _node: FSNode): void {}
 
-  removeChild(parent: DirectoryNode, name: string): void {
-    delete parent.entries[name];
-  }
+  removeChild(_parent: DirectoryNode, _name: string): void {}
 
   renameChild(
-    fromParent: DirectoryNode,
-    fromName: string,
-    toParent: DirectoryNode,
-    toName: string,
-  ): void {
-    const node = fromParent.entries[fromName];
-    delete fromParent.entries[fromName];
-    toParent.entries[toName] = node;
-  }
+    _fromParent: DirectoryNode,
+    _fromName: string,
+    _toParent: DirectoryNode,
+    _toName: string,
+  ): void {}
 }

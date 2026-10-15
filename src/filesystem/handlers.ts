@@ -693,7 +693,9 @@ export function bindFSSyscalls(
       if (!resolved.parent || !resolved.name) {
         return WASIAbi.WASI_ERRNO_NOENT;
       }
-      backend.createChild(resolved.parent, resolved.name, makeDir());
+      const dir = makeDir();
+      backend.createChild(resolved.parent, resolved.name, dir);
+      resolved.parent.entries[resolved.name] = dir;
       return WASIAbi.WASI_ESUCCESS;
     },
 
@@ -759,6 +761,7 @@ export function bindFSSyscalls(
       if (target.node) return WASIAbi.WASI_ERRNO_EXIST;
       if (!target.parent || !target.name) return WASIAbi.WASI_ERRNO_NOENT;
       backend.linkChild(target.parent, target.name, source.node);
+      target.parent.entries[target.name] = source.node;
       source.node.nlink++;
       return WASIAbi.WASI_ESUCCESS;
     },
@@ -826,6 +829,7 @@ export function bindFSSyscalls(
         }
         const created = makeFile(new Uint8Array(0));
         backend.createChild(resolved.parent, resolved.name, created);
+        resolved.parent.entries[resolved.name] = created;
         node = created;
       }
 
@@ -893,6 +897,7 @@ export function bindFSSyscalls(
         return WASIAbi.WASI_ERRNO_NOTEMPTY;
       }
       backend.removeChild(resolved.parent, resolved.name);
+      delete resolved.parent.entries[resolved.name];
       return WASIAbi.WASI_ESUCCESS;
     },
 
@@ -941,6 +946,8 @@ export function bindFSSyscalls(
         target.parent,
         target.name,
       );
+      delete source.parent.entries[source.name];
+      target.parent.entries[target.name] = source.node;
       if (target.node && target.node.type !== "dir") target.node.nlink--;
       return WASIAbi.WASI_ESUCCESS;
     },
@@ -969,11 +976,9 @@ export function bindFSSyscalls(
       if (!resolved.parent || !resolved.name) {
         return WASIAbi.WASI_ERRNO_NOENT;
       }
-      backend.createChild(
-        resolved.parent,
-        resolved.name,
-        makeSymlink(targetPath),
-      );
+      const link = makeSymlink(targetPath);
+      backend.createChild(resolved.parent, resolved.name, link);
+      resolved.parent.entries[resolved.name] = link;
       return WASIAbi.WASI_ESUCCESS;
     },
 
@@ -987,6 +992,7 @@ export function bindFSSyscalls(
         return WASIAbi.WASI_ERRNO_INVAL;
       }
       backend.removeChild(resolved.parent, resolved.name);
+      delete resolved.parent.entries[resolved.name];
       resolved.node.nlink--;
       return WASIAbi.WASI_ESUCCESS;
     },

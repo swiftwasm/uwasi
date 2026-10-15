@@ -92,6 +92,19 @@ export function sysUnlink(h, name) {
   return h.imports.path_unlink_file(PREOPEN_FD, PATH_PTR, len);
 }
 
+export function sysRename(h, from, to) {
+  const fromLen = putPath(h, from, PATH_PTR);
+  const toLen = putPath(h, to, PATH2_PTR);
+  return h.imports.path_rename(
+    PREOPEN_FD,
+    PATH_PTR,
+    fromLen,
+    PREOPEN_FD,
+    PATH2_PTR,
+    toLen,
+  );
+}
+
 export function sysLink(h, from, to) {
   const fromLen = putPath(h, from, PATH_PTR);
   const toLen = putPath(h, to, PATH2_PTR);
