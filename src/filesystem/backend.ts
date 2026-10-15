@@ -37,15 +37,17 @@ export interface FSBackend {
   readAt(node: FileNode, buf: Uint8Array, offset: number): number;
 
   /**
-   * Write all of `data` at `offset`. `data` is never empty. If the write
+   * Write `data` at `offset`, and return the number of bytes written. It is
+   * less than `data.byteLength` only when the rest cannot be written now,
+   * for example when storage is full. `data` is never empty. If the write
    * ends past the end of the file, extend the file, and fill any gap with
    * zeros. The syscall layer does not resize the file first.
    *
-   * A write that throws can still have changed the file. `fd_write` and
-   * `fd_pwrite` call this once for each iovec, in order. When a later call
-   * throws, the earlier iovecs stay written.
+   * Throw `FSError` only when nothing could be written. `fd_write` and
+   * `fd_pwrite` call this once for each iovec, in order, and report a short
+   * write when a later call writes less, or throws.
    */
-  writeAt(node: FileNode, data: Uint8Array, offset: number): void;
+  writeAt(node: FileNode, data: Uint8Array, offset: number): number;
 
   /**
    * Truncate the file to `size` bytes, or extend it with zeros. `size` is a

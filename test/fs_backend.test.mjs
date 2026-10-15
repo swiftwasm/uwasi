@@ -62,25 +62,57 @@ describe("FSBackend seam", () => {
     );
   });
 
-  it("keeps earlier iovecs written when a later one fails", () => {
-    const { backend, fs, h } = setup();
-    const { fd } = sysCreate(h, "file");
+  /** Make the backend's `writeAt` calls go through `write(call, ...args)`. */
+  function wrapWrites(backend, write) {
     const writeAt = backend.writeAt.bind(backend);
-    let calls = 0;
-    backend.writeAt = (...args) => {
-      if (++calls === 2) throw new FSError(NOSPC);
-      writeAt(...args);
-    };
+    let call = 0;
+    backend.writeAt = (...args) => write(++call, writeAt, ...args);
+  }
+  const tell = (h, fd) => {
+    assert.equal(h.imports.fd_tell(fd, 8192), ESUCCESS);
+    return h.view.getBigUint64(8192, true);
+  };
+
+  it("reports a short write when a later iovec fails", () => {
+    const { backend, h } = setup();
+    const { fd } = sysCreate(h, "file");
+    wrapWrites(backend, (call, writeAt, ...args) => {
+      if (call === 2) throw new FSError(NOSPC);
+      return writeAt(...args);
+    });
+    assert.deepEqual(sysWrite(h, fd, "first", "second"), {
+      errno: ESUCCESS,
+      written: 5,
+    });
+    assert.equal(tell(h, fd), 5n);
+    assert.equal(sysSeekStart(h, fd), ESUCCESS);
+    assert.equal(sysReadText(h, fd).text, "first");
+  });
+
+  it("stops at a short writeAt and reports what it wrote", () => {
+    const { backend, h } = setup();
+    const { fd } = sysCreate(h, "file");
+    wrapWrites(backend, (call, writeAt, node, data, offset) =>
+      writeAt(node, data.subarray(0, 2), offset),
+    );
+    assert.deepEqual(sysWrite(h, fd, "first", "second"), {
+      errno: ESUCCESS,
+      written: 2,
+    });
+    assert.equal(tell(h, fd), 2n);
+  });
+
+  it("returns the errno when nothing was written", () => {
+    const { backend, h } = setup();
+    const { fd } = sysCreate(h, "file");
+    wrapWrites(backend, () => {
+      throw new FSError(NOSPC);
+    });
     assert.deepEqual(sysWrite(h, fd, "first", "second"), {
       errno: NOSPC,
       written: 0,
     });
-    assert.equal(new TextDecoder().decode(fs.lookup("/file").content), "first");
-    // The cursor stays where it was: the call failed.
-    assert.equal(h.imports.fd_tell(fd, 8192), ESUCCESS);
-    assert.equal(h.view.getBigUint64(8192, true), 0n);
-    assert.equal(sysSeekStart(h, fd), ESUCCESS);
-    assert.equal(sysReadText(h, fd).text, "first");
+    assert.equal(tell(h, fd), 0n);
   });
 
   it("calls openFile and closeFile once for each fd", () => {
@@ -180,6 +212,7 @@ class MapBackend {
     const end = offset + data.byteLength;
     if (end > this.fileSize(node)) this.resize(node, end);
     this.#data(node).set(data, offset);
+    return data.byteLength;
   }
   resize(node, size) {
     const next = new Uint8Array(size);

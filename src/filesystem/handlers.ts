@@ -281,24 +281,34 @@ export function bindFSSyscalls(
   };
 
   /**
-   * Write `iovViews` to `node` from `position`, and return the end position.
-   * The backend extends the file itself, so there is no resize first: that
-   * would cost a backend with real files an extra truncate. Each iovec is
-   * one `writeAt`. When a later one fails, the earlier ones stay written,
-   * and the syscall reports only the errno.
+   * Write `iovViews` to `node` from `position`, one `writeAt` per iovec, and
+   * return the number of bytes written. The backend extends the file itself,
+   * so there is no resize first: that would cost a backend with real files
+   * an extra truncate.
+   *
+   * Like POSIX `write`, a write that fails part of the way through reports
+   * the bytes before the failure. It stops at a short `writeAt`, or when a
+   * later `writeAt` throws, and returns the count so far. Only a write that
+   * wrote nothing reports the error.
    */
   const writeIovecs = (
     node: FileNode,
     iovViews: Uint8Array[],
     position: number,
   ): number => {
-    for (const buf of iovViews) {
-      if (buf.byteLength === 0) continue;
-      backend.writeAt(node, buf, position);
-      position += buf.byteLength;
+    let written = 0;
+    try {
+      for (const buf of iovViews) {
+        if (buf.byteLength === 0) continue;
+        const count = backend.writeAt(node, buf, position + written);
+        written += count;
+        if (count < buf.byteLength) break;
+      }
+    } catch (error) {
+      if (written === 0) throw error;
     }
-    node.mtim = nowNs();
-    return position;
+    if (written > 0) node.mtim = nowNs();
+    return written;
   };
 
   /** Read into `iovViews` from `position`; returns the bytes read. */
@@ -485,8 +495,8 @@ export function bindFSSyscalls(
         return WASIAbi.WASI_ESUCCESS;
       }
       if (position + total > MAX_FILE_SIZE) return WASIAbi.WASI_ERRNO_FBIG;
-      writeIovecs(file.node, iovViews, position);
-      view.setUint32(nwritten, total, true);
+      const written = writeIovecs(file.node, iovViews, position);
+      view.setUint32(nwritten, written, true);
       return WASIAbi.WASI_ESUCCESS;
     },
 
@@ -651,8 +661,9 @@ export function bindFSSyscalls(
         return WASIAbi.WASI_ESUCCESS;
       }
       if (position + total > MAX_FILE_SIZE) return WASIAbi.WASI_ERRNO_FBIG;
-      file.position = writeIovecs(file.node, iovViews, position);
-      view.setUint32(nwritten, total, true);
+      const written = writeIovecs(file.node, iovViews, position);
+      file.position = position + written;
+      view.setUint32(nwritten, written, true);
       return WASIAbi.WASI_ESUCCESS;
     },
 

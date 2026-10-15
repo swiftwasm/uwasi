@@ -18,7 +18,7 @@ Every method is synchronous, because the syscalls are synchronous. Finish any as
 |--------|------------|
 | `fileSize(node)` | `stat`, seeks from the end, appends |
 | `readAt(node, buf, offset)` | `fd_read`, `fd_pread`. Returns the bytes read: fewer than asked only at the end of the file. |
-| `writeAt(node, data, offset)` | `fd_write`, `fd_pwrite`. Extends the file and zero-fills any gap. `data` is never empty. |
+| `writeAt(node, data, offset)` | `fd_write`, `fd_pwrite`. Returns the bytes written; extends the file and zero-fills any gap. `data` is never empty. |
 | `resize(node, size)` | `fd_filestat_set_size`, `fd_allocate`, `O_TRUNC` |
 | `sync(node)`, `datasync(node)` | `fd_sync`, `fd_datasync`, on a file or a directory |
 | `openFile(node)`, `closeFile(node)` | each fd on a regular file |
@@ -53,7 +53,7 @@ For another backend, `content` holds only what the host put there, for example w
 
 ## Writes
 
-`fd_write` and `fd_pwrite` call `writeAt` once for each iovec, in order. There is no resize before the write. If a later `writeAt` throws, the earlier iovecs stay written, and the syscall returns only the errno. A write that would end past `Number.MAX_SAFE_INTEGER` fails with `FBIG` before anything is written. A zero-length write returns at once, and does not call the backend.
+`fd_write` and `fd_pwrite` call `writeAt` once for each iovec, in order. There is no resize before the write. `writeAt` returns the bytes it wrote, and throws `FSError` only when it wrote nothing. As with POSIX `write`, a write that stops part of the way through, because `writeAt` wrote less or a later call threw, succeeds with the count so far, and `fd_write` moves the cursor by that count. Only a write that wrote nothing returns the errno. A write that would end past `Number.MAX_SAFE_INTEGER` fails with `FBIG` before anything is written. A zero-length write returns at once, and does not call the backend.
 
 ## Open files
 

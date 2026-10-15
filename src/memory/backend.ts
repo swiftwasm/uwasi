@@ -21,10 +21,11 @@ export class MemoryFSBackend implements FSBackend {
     return count;
   }
 
-  writeAt(node: FileNode, data: Uint8Array, offset: number): void {
+  writeAt(node: FileNode, data: Uint8Array, offset: number): number {
     const end = offset + data.byteLength;
     if (end > node.content.byteLength) this.resize(node, end);
     node.content.set(data, offset);
+    return data.byteLength;
   }
 
   resize(node: FileNode, size: number): void {
