@@ -1,5 +1,5 @@
-import { OPFSBackend, useOPFS } from "uwasi/opfs";
-import { FSError } from "uwasi/filesystem";
+import { ExclusiveOPFSBackend, ExclusiveOPFSFileSystem } from "uwasi/opfs";
+import { FSError, useFS } from "uwasi/filesystem";
 import { WASIAbi } from "../lib/esm/abi.js";
 import { MockOPFS } from "./opfs_mock.mjs";
 import {
@@ -27,9 +27,9 @@ const {
   WASI_ERRNO_NOTSUP: NOTSUP,
 } = WASIAbi;
 
-describe("OPFSBackend", () => {
+describe("ExclusiveOPFSBackend", () => {
   async function open(t) {
-    const backend = await OPFSBackend.create(new MockOPFS().root);
+    const backend = await ExclusiveOPFSBackend.create(new MockOPFS().root);
     t.after(() => backend.close());
     return { backend, root: backend.fileSystem.lookup("/") };
   }
@@ -69,19 +69,19 @@ describe("OPFSBackend", () => {
 
   it("persists namespace changes without changing the live tree", async () => {
     const store = new MockOPFS();
-    const backend = await OPFSBackend.create(store.root);
+    const backend = await ExclusiveOPFSBackend.create(store.root);
     const root = backend.fileSystem.lookup("/");
     backend.createChild(root, "file", newFile(backend));
     assert.strictEqual(root.entries.file, undefined);
     store.simulateCrash();
-    const fresh = await OPFSBackend.create(store.root);
+    const fresh = await ExclusiveOPFSBackend.create(store.root);
     assert.strictEqual(fresh.fileSystem.lookup("/file").type, "file");
     await fresh.close();
   });
 
   it("does not touch the live tree when a change takes a snapshot", async () => {
     const store = new MockOPFS();
-    const backend = await OPFSBackend.create(store.root);
+    const backend = await ExclusiveOPFSBackend.create(store.root);
     // A seeded directory has no record yet, so renaming it takes a snapshot.
     backend.fileSystem.addFile("/dir/seeded", "seeded");
     const root = backend.fileSystem.lookup("/");
@@ -138,7 +138,7 @@ describe("OPFSBackend", () => {
 });
 
 async function makeWorker(store, options = {}) {
-  const backend = await OPFSBackend.create(store.root, options);
+  const backend = await ExclusiveOPFSBackend.create(store.root, options);
   return { backend, h: bindImports(backend, backend.fileSystem) };
 }
 
@@ -158,17 +158,18 @@ function assertFile(h, name, text) {
 }
 
 describe("OPFS persistence", () => {
-  it("creates, writes, reads and reopens through useOPFS", async () => {
+  it("creates, writes, reads and reopens through useFS", async () => {
     const store = new MockOPFS({ closeFlushes: false });
-    const w = await makeWorker(store);
-    w.h.imports = useOPFS({ withBackend: w.backend })(
+    const fileSystem = await ExclusiveOPFSFileSystem.create(store.root);
+    const h = bindImports(fileSystem.backend, fileSystem);
+    h.imports = useFS({ withFileSystem: fileSystem })(
       {},
       new WASIAbi(),
-      () => w.h.view,
+      () => h.view,
     );
-    putFile(w.h, "data.db", "hello opfs");
-    assertFile(w.h, "data.db", "hello opfs");
-    await w.backend.close();
+    putFile(h, "data.db", "hello opfs");
+    assertFile(h, "data.db", "hello opfs");
+    await fileSystem.backend.close();
     store.simulateCrash();
 
     const fresh = await makeWorker(store);
@@ -407,7 +408,10 @@ describe("OPFS namespace and errors", () => {
         .sort()
         .map((name) => [name, Array.from(store.durableContent(name))]);
     const before = contents();
-    await assert.rejects(OPFSBackend.create(store.root), /does not understand/);
+    await assert.rejects(
+      ExclusiveOPFSBackend.create(store.root),
+      /does not understand/,
+    );
     assert.deepStrictEqual(contents(), before);
   });
 });

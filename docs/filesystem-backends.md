@@ -1,6 +1,6 @@
 # Filesystem backends
 
-`useFS({ withBackend, withFileSystem, withStdio })` serves the WASI filesystem syscalls from a storage backend. It is exported from `uwasi` and from `uwasi/filesystem`. `useMemoryFS` is `useFS` with the built-in `MemoryFSBackend`; its options and `useAll()` are unchanged.
+`useFS({ withFileSystem, withStdio })` serves the WASI filesystem syscalls from `withFileSystem.backend`, a storage backend. It is exported from `uwasi` and from `uwasi/filesystem`. `useMemoryFS` is `useFS` with a `MemoryFileSystem`, whose `backend` is the built-in `MemoryFSBackend`; its options and `useAll()` are unchanged.
 
 ## Who does what
 
@@ -76,9 +76,9 @@ An fd can outlive the name of its file. After an unlink, or a rename that replac
 
 ## The OPFS backend
 
-`uwasi/opfs` exports `OPFSBackend`, which implements `FSBackend` over the Origin Private File System, and `useOPFS`, which is `useFS` with that backend and its namespace. The OPFS code imports the core only through `src/filesystem/index.ts`, the source of `uwasi/filesystem`, so it uses nothing that another backend could not.
+`uwasi/opfs` exports `ExclusiveOPFSBackend`, which implements `FSBackend` over the Origin Private File System, and `ExclusiveOPFSFileSystem`, the `MemoryFileSystem` whose `backend` it is. The OPFS code imports the core only through `src/filesystem/index.ts`, the source of `uwasi/filesystem`, so it uses nothing that another backend could not.
 
-`OPFSBackend.create(directory, options)` is asynchronous: it opens the store, rebuilds the namespace and opens a sync access handle for every data file. Create it before the guest starts. `settle()`, `persistAll()` and `close()` are also asynchronous, and run between guest calls.
+`ExclusiveOPFSFileSystem.create(directory, options)` is asynchronous: it opens the store, rebuilds the namespace and opens a sync access handle for every data file. Create it before the guest starts. `fileSystem.backend` has `settle()`, `persistAll()` and `close()`, which are also asynchronous, and run between guest calls.
 
 Limits:
 

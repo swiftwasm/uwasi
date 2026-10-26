@@ -267,13 +267,13 @@ function writeFully(
  * not persisted, and the store needs exactly one live backend, since sync
  * access handles are exclusive locks.
  */
-export class OPFSBackend implements FSBackend {
+export class ExclusiveOPFSBackend implements FSBackend {
   /**
    * The node tree the syscall layer resolves paths against. Grafted from
    * the namespace record at `create()`; from then on the backend keeps it
    * exact while persisting every namespace change.
    */
-  readonly fileSystem: MemoryFileSystem;
+  readonly fileSystem: ExclusiveOPFSFileSystem;
 
   private metaHandles: OPFSSyncAccessHandle[] = [];
   /** Generation of the newest snapshot known durable: the log builds on it. */
@@ -359,7 +359,7 @@ export class OPFSBackend implements FSBackend {
     private readonly spareTarget: number,
     preopens?: { [guestPath: string]: string },
   ) {
-    this.fileSystem = new MemoryFileSystem(preopens);
+    this.fileSystem = new ExclusiveOPFSFileSystem(this, preopens);
   }
 
   /**
@@ -387,8 +387,8 @@ export class OPFSBackend implements FSBackend {
        */
       spareFiles?: number;
     } = {},
-  ): Promise<OPFSBackend> {
-    const backend = new OPFSBackend(
+  ): Promise<ExclusiveOPFSBackend> {
+    const backend = new ExclusiveOPFSBackend(
       store,
       options.spareFiles ?? 16,
       options.preopens,
@@ -1640,5 +1640,31 @@ export class OPFSBackend implements FSBackend {
       // unreferenced data file that re-init reclaims.
       this.tombstone(replaced, false);
     }
+  }
+}
+
+/**
+ * The filesystem of an OPFS store, for `useFS({ withFileSystem })`.
+ * `backend` is the `ExclusiveOPFSBackend` that owns the store, with
+ * `settle()`, `persistAll()` and `close()`.
+ */
+export class ExclusiveOPFSFileSystem extends MemoryFileSystem {
+  override readonly backend: ExclusiveOPFSBackend;
+
+  /** `ExclusiveOPFSBackend.create`, returning the filesystem. */
+  static async create(
+    store: OPFSDirectoryHandle,
+    options?: Parameters<typeof ExclusiveOPFSBackend.create>[1],
+  ): Promise<ExclusiveOPFSFileSystem> {
+    return (await ExclusiveOPFSBackend.create(store, options)).fileSystem;
+  }
+
+  /** Only its backend builds one; use `create()`. */
+  constructor(
+    backend: ExclusiveOPFSBackend,
+    preopens: { [guestPath: string]: string } | undefined,
+  ) {
+    super(preopens);
+    this.backend = backend;
   }
 }

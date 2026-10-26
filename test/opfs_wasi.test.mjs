@@ -6,8 +6,9 @@ import {
   useClock,
   usePoll,
   useProc,
+  useFS,
 } from "../lib/esm/index.js";
-import { useOPFS, OPFSBackend } from "uwasi/opfs";
+import { ExclusiveOPFSBackend } from "uwasi/opfs";
 import { MockOPFS } from "./opfs_mock.mjs";
 import * as crypto from "crypto";
 import { cloneDirectories, wasiSuite } from "./wasi_suite.mjs";
@@ -38,7 +39,7 @@ wasiSuite(
     // The OPFS backend over a mock store: same syscall surface, but every
     // namespace change round-trips through the durable namespace record.
     const store = new MockOPFS();
-    const backend = await OPFSBackend.create(store.root, { preopens });
+    const backend = await ExclusiveOPFSBackend.create(store.root, { preopens });
     try {
       await cloneDirectories(backend.fileSystem, testCase);
       // Seeded files are persisted up front so the spare pool stays free
@@ -50,7 +51,7 @@ wasiSuite(
     }
     return {
       features: [
-        useOPFS({ withBackend: backend, withStdio }),
+        useFS({ withFileSystem: backend.fileSystem, withStdio }),
         useEnviron(),
         useArgs(),
         useClock(),
