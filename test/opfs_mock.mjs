@@ -111,6 +111,7 @@ class MockSyncAccessHandle {
     }
     this.#closed = true;
     this.#state.lock = null;
+    this.#store.openHandles--;
   }
 }
 
@@ -138,6 +139,10 @@ class MockFileHandle {
       );
     }
     this._store._fireFault("createSyncAccessHandle", this._state.path);
+    if (this._store.openHandles >= this._store.maxHandles) {
+      throw new DOMException("Invalid platform file handle", "UnknownError");
+    }
+    this._store.openHandles++;
     const handle = new MockSyncAccessHandle(
       this._state,
       this._connection,
@@ -253,8 +258,11 @@ function matches(match, path, op) {
 }
 
 export class MockOPFS {
-  constructor({ closeFlushes = true } = {}) {
+  /** `maxHandles` caps the open sync access handles, as WebKit does. */
+  constructor({ closeFlushes = true, maxHandles = Infinity } = {}) {
     this.closeFlushes = closeFlushes;
+    this.maxHandles = maxHandles;
+    this.openHandles = 0;
     this._rootState = new DirState("");
     this._connection = { alive: true };
     this._faults = [];

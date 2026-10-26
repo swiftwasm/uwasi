@@ -248,6 +248,12 @@ function writeFully(
   }
 }
 
+/** Whether a refused handle may be the engine's cap (WebKit: about 250). */
+function refusedAtLimit(error: unknown): boolean {
+  const name = (error as { name?: string } | null)?.name;
+  return name === "UnknownError" || name === "InvalidStateError";
+}
+
 /**
  * An OPFS-backed `FSBackend` for workers.
  *
@@ -494,16 +500,39 @@ export class ExclusiveOPFSBackend implements FSBackend {
     this.nextId = Math.max(maxSeenId, replay.maxFile) + 1;
     this.nextDirId = replay.maxDir + 1;
 
-    // Claim every referenced data file's handle for life.
-    const referenced = [...this.physByNode.values()];
-    for (const id of referenced) dataFiles.delete(id);
-    await forEachConcurrently(referenced, async (id) => {
-      // A referenced file that is physically missing (a foreign actor
-      // removed it, or `close()` did for a file it reported lost) is
-      // recreated: it surfaces as an empty file rather than failing the
-      // whole store. Only a failed open closes the backend, once this has
-      // finished, so a handle always arrives.
+    // Claim every referenced data file's handle for life, existing files
+    // first: only they can hold content. Only a failed open closes the
+    // backend, once this has finished, so a handle always arrives.
+    const referenced = [...this.physByNode];
+    const present = referenced.filter(([, id]) => dataFiles.has(id));
+    const missing = referenced.filter(([, id]) => !dataFiles.has(id));
+    for (const [, id] of referenced) dataFiles.delete(id);
+    await forEachConcurrently(present, async ([, id]) => {
       this.handleById.set(id, (await this.openDataFile(id))!);
+    }).catch((error: unknown) => {
+      if ((error as { name?: string } | null)?.name !== "UnknownError") {
+        throw error;
+      }
+      throw Object.assign(
+        new Error(
+          `uwasi: the OPFS store ${storeLabel(this.store)} holds ${present.length} files and needs ${present.length + 3} sync access handles, but the browser refused one; it may allow fewer per worker`,
+        ),
+        { cause: error },
+      );
+    });
+    // A referenced file that is physically missing (a foreign actor
+    // removed it, `close()` did for a file it reported lost, or the engine
+    // refused it a handle) is recreated: it surfaces as an empty file
+    // rather than failing the whole store. At the handle limit it waits,
+    // empty, for its data file, as a file created past the spare pool does.
+    await forEachConcurrently(missing, async ([node, id]) => {
+      try {
+        this.handleById.set(id, (await this.openDataFile(id, true))!);
+      } catch (error) {
+        if (!refusedAtLimit(error)) throw error;
+        this.physByNode.delete(node);
+        this.pendingIds.set(node, id);
+      }
     });
 
     // Reclaim tombstones: destroy any leftover content, reuse as spares.
@@ -1021,16 +1050,24 @@ export class ExclusiveOPFSBackend implements FSBackend {
    * needed. Background work can outlive the backend - a failed `create()`
    * releases every handle while work it queued still waits on OPFS - so a
    * handle that arrives after shutdown is released at once, and nothing is
-   * returned in its place.
+   * returned in its place. `fresh` says no data file `id` held content
+   * before: if the engine refuses its handle, the empty file this created
+   * is removed again, so it costs the next open no handle.
    */
   private async openDataFile(
     id: number,
+    fresh = false,
   ): Promise<OPFSSyncAccessHandle | undefined> {
     const fileHandle = await this.store.getFileHandle(dataName(id), {
       create: true,
     });
     if (this.closed) return undefined;
-    const handle = await fileHandle.createSyncAccessHandle();
+    const handle = await fileHandle
+      .createSyncAccessHandle()
+      .catch(async (error: unknown) => {
+        if (fresh) await this.store.removeEntry(dataName(id)).catch(() => {});
+        throw error;
+      });
     if (this.closed) {
       try {
         handle.close();
@@ -1053,7 +1090,7 @@ export class ExclusiveOPFSBackend implements FSBackend {
     let handle = this.handleById.get(id);
     const retry = handle !== undefined;
     if (handle === undefined) {
-      handle = await this.openDataFile(id);
+      handle = await this.openDataFile(id, true);
       if (handle === undefined) return;
       // Tracked at once, so a failure below leaves it for the next attempt
       // and for `close()` to release.
@@ -1093,14 +1130,21 @@ export class ExclusiveOPFSBackend implements FSBackend {
     node.content = new Uint8Array(0);
   }
 
-  /** Create spare data files until the pool reaches its target. */
+  /**
+   * Create spare data files until the pool reaches its target. Spares are
+   * optional: at the handle limit the pool stays smaller.
+   */
   private async refillSpares(): Promise<void> {
     const ids: number[] = [];
     while (this.spares.length + ids.length < this.spareTarget) {
       ids.push(this.nextId++);
     }
     await forEachConcurrently(ids, async (id) => {
-      const handle = await this.openDataFile(id);
+      const handle = await this.openDataFile(id, true).catch(
+        (error: unknown) => {
+          if (!refusedAtLimit(error)) throw error;
+        },
+      );
       if (handle === undefined) return;
       this.handleById.set(id, handle);
       this.spares.push(id);
@@ -1303,6 +1347,10 @@ export class ExclusiveOPFSBackend implements FSBackend {
       } catch {
         // See above.
       }
+    }
+    // An empty file loses nothing: the next open recreates it empty.
+    for (const node of lost) {
+      if (node.content.byteLength === 0) lost.delete(node);
     }
     if (lost.size > 0) {
       throw (

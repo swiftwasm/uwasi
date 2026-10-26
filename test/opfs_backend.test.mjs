@@ -533,6 +533,33 @@ describe("OPFS recovery", () => {
     assertFile(fresh.h, "victim", "OLD");
     await fresh.backend.close();
   });
+
+  it("reopens a store filled to the handle limit", async () => {
+    const store = new MockOPFS({ maxHandles: 24 });
+    const w = await makeWorker(store, { spareFiles: 4 });
+    const synced = [];
+    for (let i = 0; i < 30; i++) {
+      const { errno, fd } = sysCreate(w.h, `f${i}`);
+      assert.strictEqual(errno, ESUCCESS);
+      assert.strictEqual(sysWrite(w.h, fd, `file ${i}`).errno, ESUCCESS);
+      if (sysSync(w.h, fd) === ESUCCESS) synced.push(i);
+      assert.strictEqual(sysClose(w.h, fd), ESUCCESS);
+      await w.backend.settle().catch(() => {});
+    }
+    await w.backend.close().catch(() => {});
+    assert.strictEqual(synced.length, 21);
+
+    const fresh = await makeWorker(store, { spareFiles: 4 });
+    for (const i of synced) assertFile(fresh.h, `f${i}`, `file ${i}`);
+    await fresh.backend.close();
+    store.maxHandles = 10;
+    await assert.rejects(
+      ExclusiveOPFSBackend.create(store.root),
+      (error) =>
+        /holds 21 files/.test(error.message) &&
+        error.cause.name === "UnknownError",
+    );
+  });
 });
 
 describe("MockOPFS durability", () => {
