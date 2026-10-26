@@ -1,4 +1,8 @@
-import { ExclusiveOPFSBackend, ExclusiveOPFSFileSystem } from "uwasi/opfs";
+import {
+  ExclusiveOPFSBackend,
+  ExclusiveOPFSFileSystem,
+  OPFSStoreBusyError,
+} from "uwasi/opfs";
 import { FSError, useFS } from "uwasi/filesystem";
 import { WASIAbi } from "../lib/esm/abi.js";
 import { MockOPFS } from "./opfs_mock.mjs";
@@ -413,6 +417,38 @@ describe("OPFS namespace and errors", () => {
       /does not understand/,
     );
     assert.deepStrictEqual(contents(), before);
+  });
+
+  it("reports a store another context holds as busy, unchanged", async () => {
+    const store = new MockOPFS();
+    const contents = () =>
+      store
+        .rootNames()
+        .sort()
+        .map((name) => [name, Array.from(store.durableContent(name))]);
+    const first = await makeWorker(store);
+    putFile(first.h, "kept", "first owner");
+    await first.backend.settle();
+    // A meta file a live backend holds, then a data file WebKit refuses.
+    for (const name of ["NoModificationAllowedError", "InvalidStateError"]) {
+      const before = contents();
+      await assert.rejects(
+        ExclusiveOPFSBackend.create(store.root),
+        (error) =>
+          error instanceof OPFSStoreBusyError && error.cause.name === name,
+      );
+      assert.deepStrictEqual(contents(), before);
+      await first.backend.close();
+      store.injectFault({
+        op: "createSyncAccessHandle",
+        match: ".uwasi.data.",
+        error: "InvalidStateError",
+      });
+    }
+    store.clearFaults();
+    const reopened = await makeWorker(store);
+    assertFile(reopened.h, "kept", "first owner");
+    await reopened.backend.close();
   });
 });
 

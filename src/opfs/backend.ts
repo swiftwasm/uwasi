@@ -64,6 +64,27 @@ export interface OPFSDirectoryHandle {
   >;
 }
 
+/**
+ * `create()` found the store open in another tab or worker, or refused a
+ * handle; it changed nothing. `cause` is the error the browser raised.
+ */
+export class OPFSStoreBusyError extends Error {
+  constructor(
+    store: string,
+    public readonly cause: unknown,
+  ) {
+    super(
+      `uwasi: the OPFS store ${store} is open in another tab or worker, or the browser refused one of its handles (${(cause as { name?: string }).name})`,
+    );
+    this.name = "OPFSStoreBusyError";
+  }
+}
+
+/** The store as error messages name it. */
+function storeLabel(store: OPFSDirectoryHandle): string {
+  return store.name === "" ? "at the OPFS root" : `"${store.name}"`;
+}
+
 // ---------------------------------------------------------------------------
 // Store layout
 // ---------------------------------------------------------------------------
@@ -402,6 +423,15 @@ export class ExclusiveOPFSBackend implements FSBackend {
       // waiting on OPFS, and must release whatever it acquires afterwards.
       backend.closed = true;
       backend.releaseHandles();
+      // A live backend holds a sync access handle on every file of its
+      // store; engines refuse another with either name.
+      const name = (error as { name?: string } | null)?.name;
+      if (
+        name === "NoModificationAllowedError" ||
+        name === "InvalidStateError"
+      ) {
+        throw new OPFSStoreBusyError(storeLabel(store), error);
+      }
       throw error;
     }
     return backend;

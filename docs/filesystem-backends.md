@@ -82,7 +82,7 @@ An fd can outlive the name of its file. After an unlink, or a rename that replac
 
 Limits:
 
-- Sync access handles exist only in workers, and each is an exclusive lock, so a store has one live backend at a time.
+- Sync access handles exist only in workers, and each is an exclusive lock, so a store has one live backend at a time. `create()` in another tab or worker meanwhile rejects with `OPFSStoreBusyError`, with the browser error as `cause`, and does not change the store.
 - Hard links return `NOTSUP`: the namespace record maps each data file to one name. Links, renames and removals of device nodes such as `/dev/null` also return `NOTSUP`, because the runtime recreates them at every start.
 - Inode numbers and timestamps are not persisted.
 - `create()` refuses a store whose namespace it cannot read, and leaves it unchanged (see [Namespace record](#namespace-record)).
