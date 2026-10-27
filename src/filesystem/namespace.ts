@@ -1,6 +1,8 @@
 import { WASIAbi } from "../abi.js";
 import { FdEntry } from "./stdio.js";
 import { isResizable, resizeContent } from "./content.js";
+import { FSBackend } from "./backend.js";
+import { MemoryFSBackend } from "../memory/backend.js";
 
 export interface NodeMeta {
   ino: bigint;
@@ -188,6 +190,8 @@ export class MemoryFileSystem {
   private ownBuffers = new WeakSet<ArrayBufferLike>();
   private root: DirectoryNode;
   private preopenPaths: string[] = [];
+  /** The storage `useFS` uses; a subclass may set its own. */
+  readonly backend: FSBackend = new MemoryFSBackend(this);
 
   /**
    * Creates a new memory file system.

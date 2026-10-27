@@ -131,23 +131,49 @@ const wasi = new WASI({
 
 ### With a custom filesystem backend
 
-`useFS` serves the filesystem syscalls from a storage backend that you supply. uwasi keeps path resolution, rights, file descriptors and guest memory. The backend stores file bytes and applies namespace changes. `useMemoryFS` is `useFS` with the built-in `MemoryFSBackend`.
+`useFS` serves the filesystem syscalls from the storage backend of the filesystem that you supply. uwasi keeps path resolution, rights, file descriptors and guest memory. The backend stores file bytes and applies namespace changes. A `MemoryFileSystem` has the built-in `MemoryFSBackend`, so `useMemoryFS` is `useFS` with a `MemoryFileSystem`.
 
 ```js
 import { WASI, useFS } from "uwasi";
 import { MemoryFileSystem, MemoryFSBackend } from "uwasi/filesystem";
 
-const fileSystem = new MemoryFileSystem({ "/": "/" });
+class MyFileSystem extends MemoryFileSystem {
+    // Any object that implements FSBackend.
+    backend = new MemoryFSBackend(this);
+}
 const wasi = new WASI({
-    features: [useFS({
-        // Any object that implements FSBackend.
-        withBackend: new MemoryFSBackend(fileSystem),
-        withFileSystem: fileSystem,
-    })],
+    features: [useFS({ withFileSystem: new MyFileSystem({ "/": "/" }) })],
 });
 ```
 
 A backend implements the synchronous `FSBackend` interface from `uwasi/filesystem`, and reports a storage failure by throwing `FSError`. See [Filesystem backends](docs/filesystem-backends.md) for the contract.
+
+### Durable files over OPFS with `ExclusiveOPFSFileSystem`
+
+`ExclusiveOPFSFileSystem` is the same filesystem as `MemoryFileSystem`, stored in the [Origin Private File System](https://developer.mozilla.org/en-US/docs/Web/API/File_System_API/Origin_private_file_system), so files survive page reloads and worker restarts. File names are saved when each change returns; file content is saved by `fd_sync`, `fd_datasync` or `backend.close()`. It uses OPFS sync access handles, which browsers provide only in workers, so run the guest in a worker. Opening it is asynchronous, so create it first and pass it to `useFS`:
+
+```js
+import { WASI, useFS } from "uwasi";
+import { ExclusiveOPFSFileSystem } from "uwasi/opfs";
+
+const fileSystem = await ExclusiveOPFSFileSystem.create(
+    await navigator.storage.getDirectory(),
+);
+const backend = fileSystem.backend;
+const wasi = new WASI({
+    features: [useFS({ withFileSystem: fileSystem })],
+});
+// ... run the guest ...
+await backend.close();
+```
+
+The directory passed to `ExclusiveOPFSFileSystem.create` becomes a store that uwasi owns: one content file per guest file, plus a checksummed record of the guest's names. It is not a copy of the guest's tree, and other files in the directory are left alone. Namespace changes are durable when the syscall returns, and `fd_sync` and `fd_datasync` flush the file.
+
+To give the guest files at startup, add them through `backend.fileSystem` and then `await backend.persistAll()`. File creation is synchronous because the backend keeps a pool of empty spare files (`spareFiles`, default 16). A guest call that creates more files than that still succeeds, but those files become durable only after the event loop turns; until then `fd_sync` on them returns `NOSPC`. `await backend.settle()` between guest calls makes them durable and refills the pool. See [Sizing the OPFS spare pool](docs/filesystem-backends.md#sizing-the-opfs-spare-pool).
+
+Hard links return `NOTSUP`, and so do links, renames and removals of device nodes such as `/dev/null`, which the runtime recreates at every start. `ExclusiveOPFSFileSystem.create` refuses a store that it cannot read, such as one a later version wrote, and leaves it unchanged.
+
+OPFS is available only from `uwasi/opfs`. Importing `uwasi` does not load it.
 
 ### With `poll_oneoff` and `sched_yield` enabled
 
@@ -216,9 +242,12 @@ worker threads need no special setup.
 43 of the 46 WASI preview1 functions are implemented (the three
 socket-transfer calls are deliberately absent — preview1 sockets are
 vestigial and were replaced wholesale in preview2). The filesystem surface
-is provided by `useMemoryFS` (or `useFS` with another backend) and validated against the full
+is provided by `useMemoryFS`, or by `useFS` with another backend such as
+`ExclusiveOPFSFileSystem`. Both are validated against the full
 [wasi-testsuite](https://github.com/WebAssembly/wasi-testsuite) with zero
-skipped cases; `useStdio` provides the stdio subset only.
+skipped cases; OPFS runs over a mock store, not a real browser, and fails
+only the hard-link case, with `NOTSUP`. `useStdio` provides the stdio subset
+only.
 
 | Syscall | Status | Notes |
 |-------|----------|---------|
@@ -228,7 +257,7 @@ skipped cases; `useStdio` provides the stdio subset only.
 | `fd_advise` | ✅ | Validates the advice; otherwise a no-op |
 | `fd_allocate` | ✅ | Rights-checked; grows the file to `offset + len`, never shrinks |
 | `fd_close` | ✅ | Preopens are closable |
-| `fd_datasync` / `fd_sync` | ✅ | Passed to the backend; no-op success for memory |
+| `fd_datasync` / `fd_sync` | ✅ | Passed to the backend: no-op success for memory; a real flush for OPFS |
 | `fd_fdstat_get` | ✅ | Reports real per-fd flags and rights |
 | `fd_fdstat_set_flags` | ✅ | `APPEND` honored by `fd_write` |
 | `fd_fdstat_set_rights` | ✅ | Rights may only shrink (`NOTCAPABLE` otherwise) |
@@ -244,7 +273,7 @@ skipped cases; `useStdio` provides the stdio subset only.
 | `path_create_directory` | ✅ | Single level; parent must exist |
 | `path_filestat_get` | ✅ | `SYMLINK_FOLLOW` honored |
 | `path_filestat_set_times` | ✅ | Symlink-aware (lstat-level timestamps) |
-| `path_link` | ✅ | Hard links with shared inode and `nlink` accounting |
+| `path_link` | ✅ | Hard links with shared inode and `nlink` accounting; `NOTSUP` on OPFS |
 | `path_open` | ✅ | Full `oflags`/`fdflags`/rights semantics; sandboxed path resolution |
 | `path_readlink` | ✅ | Silent truncation to the buffer, no NUL |
 | `path_remove_directory` | ✅ | `NOTEMPTY` on non-empty directories |

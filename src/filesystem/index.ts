@@ -1,6 +1,5 @@
 import { WASIAbi } from "../abi.js";
 import { WASIFeatureProvider } from "../options.js";
-import { FSBackend } from "./backend.js";
 import { bindFSSyscalls } from "./handlers.js";
 import { MemoryFileSystem } from "./namespace.js";
 import { StdioOptions } from "./stdio.js";
@@ -29,7 +28,7 @@ export const FSErrno = {
 
 /**
  * Creates a feature provider that implements the filesystem syscalls over
- * `withBackend`, a storage backend, and `withFileSystem`, its namespace.
+ * `withFileSystem`, a namespace, and `withFileSystem.backend`, its storage.
  *
  * The namespace supplies the node tree and the preopened directories;
  * `WASIOptions.preopens` is not used. Finish any asynchronous setup of the
@@ -39,7 +38,6 @@ export const FSErrno = {
  * const wasi = new WASI({
  *   features: [
  *     useFS({
- *       withBackend: backend,
  *       withFileSystem: fileSystem,
  *       withStdio: { stdout: (lines) => console.log(lines) },
  *     }),
@@ -48,13 +46,12 @@ export const FSErrno = {
  * ```
  */
 export function useFS(useOptions: {
-  withBackend: FSBackend;
   withFileSystem: MemoryFileSystem;
   withStdio?: StdioOptions;
 }): WASIFeatureProvider {
   return (_options, abi, memoryView) =>
     bindFSSyscalls(
-      useOptions.withBackend,
+      useOptions.withFileSystem.backend,
       useOptions.withFileSystem,
       useOptions.withStdio || {},
       abi,

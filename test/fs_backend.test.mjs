@@ -406,12 +406,7 @@ describe("useFS and uwasi/filesystem", () => {
     const fileSystem = new filesystem.MemoryFileSystem({ "/store": "/" });
     const wasi = new WASI({
       preopens: { "/ignored": "/" },
-      features: [
-        useFS({
-          withBackend: new filesystem.MemoryFSBackend(fileSystem),
-          withFileSystem: fileSystem,
-        }),
-      ],
+      features: [useFS({ withFileSystem: fileSystem })],
     });
     const memory = new WebAssembly.Memory({ initial: 1 });
     wasi.setInstance({ exports: { memory } });

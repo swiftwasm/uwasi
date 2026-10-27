@@ -87,9 +87,17 @@ export function sysClose(h, fd) {
   return h.imports.fd_close(fd);
 }
 
-export function sysUnlink(h, name) {
+export function sysSync(h, fd) {
+  return h.imports.fd_sync(fd);
+}
+
+export function sysDatasync(h, fd) {
+  return h.imports.fd_datasync(fd);
+}
+
+export function sysMkdir(h, name) {
   const len = putPath(h, name);
-  return h.imports.path_unlink_file(PREOPEN_FD, PATH_PTR, len);
+  return h.imports.path_create_directory(PREOPEN_FD, PATH_PTR, len);
 }
 
 export function sysRename(h, from, to) {
@@ -103,6 +111,26 @@ export function sysRename(h, from, to) {
     PATH2_PTR,
     toLen,
   );
+}
+
+/** path_filestat_get following symlinks; returns errno and the file size. */
+export function sysStat(h, name) {
+  const len = putPath(h, name);
+  const errno = h.imports.path_filestat_get(
+    PREOPEN_FD,
+    WASIAbi.WASI_LOOKUPFLAGS_SYMLINK_FOLLOW,
+    PATH_PTR,
+    len,
+    FILESTAT_PTR,
+  );
+  // filestat layout: dev(8) ino(8) filetype(1+7) nlink(8) size(8) ...
+  const size = errno === 0 ? h.view.getBigUint64(FILESTAT_PTR + 32, true) : 0n;
+  return { errno, size: Number(size) };
+}
+
+export function sysUnlink(h, name) {
+  const len = putPath(h, name);
+  return h.imports.path_unlink_file(PREOPEN_FD, PATH_PTR, len);
 }
 
 export function sysLink(h, from, to) {
